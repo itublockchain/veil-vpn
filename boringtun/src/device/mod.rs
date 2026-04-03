@@ -481,6 +481,13 @@ impl Device {
 
         self.key_pair = key_pair;
         self.rate_limiter = Some(rate_limiter);
+
+        #[cfg(feature = "payment")]
+        {
+            let key_bytes = private_key.to_bytes();
+            let wallet = crate::payment::wallet::PaymentWallet::from_wireguard_key(&key_bytes);
+            tracing::info!("Payment wallet: {}", wallet.ethereum_address_hex());
+        }
     }
 
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
