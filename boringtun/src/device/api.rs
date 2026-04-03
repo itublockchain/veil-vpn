@@ -197,6 +197,14 @@ fn api_get(writer: &mut BufWriter<&UnixStream>, d: &Device) -> i32 {
 
         writeln!(writer, "rx_bytes={}", rx_bytes);
         writeln!(writer, "tx_bytes={}", tx_bytes);
+
+        #[cfg(feature = "payment")]
+        if let Some(ref quota) = p.quota {
+            writeln!(writer, "quota_remaining={}", quota.remaining());
+            writeln!(writer, "quota_blocked={}", quota.is_blocked());
+            writeln!(writer, "quota_total_consumed={}", quota.total_consumed());
+            writeln!(writer, "quota_payment_count={}", quota.payment_count());
+        }
     }
     0
 }

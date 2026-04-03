@@ -24,6 +24,8 @@ pub struct Peer {
     endpoint: RwLock<Endpoint>,
     allowed_ips: AllowedIps<()>,
     preshared_key: Option<[u8; 32]>,
+    #[cfg(feature = "payment")]
+    pub(crate) quota: Option<crate::payment::quota::BandwidthQuota>,
 }
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
@@ -67,6 +69,8 @@ impl Peer {
             }),
             allowed_ips: allowed_ips.iter().map(|ip| (ip, ())).collect(),
             preshared_key,
+            #[cfg(feature = "payment")]
+            quota: None,
         }
     }
 

@@ -336,7 +336,15 @@ impl Device {
             None,
         );
 
-        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key);
+        let mut peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key);
+
+        #[cfg(feature = "payment")]
+        {
+            peer.quota = Some(crate::payment::quota::BandwidthQuota::new(
+                crate::payment::quota::DEFAULT_QUOTA_BYTES,
+            ));
+            tracing::info!("Peer added with {}MB quota", crate::payment::quota::DEFAULT_QUOTA_BYTES / 1024 / 1024);
+        }
 
         let peer = Arc::new(Mutex::new(peer));
         self.peers.insert(pub_key, Arc::clone(&peer));
@@ -656,11 +664,31 @@ impl Device {
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
                             if p.is_allowed_ip(addr) {
+                                #[cfg(feature = "payment")]
+                                if let Some(ref quota) = p.quota {
+                                    if quota.is_blocked() {
+                                        continue;
+                                    }
+                                    if !quota.consume(packet.len() as u64) {
+                                        tracing::info!("Peer quota exhausted (udp inbound v4)");
+                                        continue;
+                                    }
+                                }
                                 t.iface.write4(packet);
                             }
                         }
                         TunnResult::WriteToTunnelV6(packet, addr) => {
                             if p.is_allowed_ip(addr) {
+                                #[cfg(feature = "payment")]
+                                if let Some(ref quota) = p.quota {
+                                    if quota.is_blocked() {
+                                        continue;
+                                    }
+                                    if !quota.consume(packet.len() as u64) {
+                                        tracing::info!("Peer quota exhausted (udp inbound v6)");
+                                        continue;
+                                    }
+                                }
                                 t.iface.write6(packet);
                             }
                         }
@@ -733,11 +761,31 @@ impl Device {
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
                             if p.is_allowed_ip(addr) {
+                                #[cfg(feature = "payment")]
+                                if let Some(ref quota) = p.quota {
+                                    if quota.is_blocked() {
+                                        continue;
+                                    }
+                                    if !quota.consume(packet.len() as u64) {
+                                        tracing::info!("Peer quota exhausted (conn inbound v4)");
+                                        continue;
+                                    }
+                                }
                                 iface.write4(packet);
                             }
                         }
                         TunnResult::WriteToTunnelV6(packet, addr) => {
                             if p.is_allowed_ip(addr) {
+                                #[cfg(feature = "payment")]
+                                if let Some(ref quota) = p.quota {
+                                    if quota.is_blocked() {
+                                        continue;
+                                    }
+                                    if !quota.consume(packet.len() as u64) {
+                                        tracing::info!("Peer quota exhausted (conn inbound v6)");
+                                        continue;
+                                    }
+                                }
                                 iface.write6(packet);
                             }
                         }
@@ -805,6 +853,17 @@ impl Device {
                         Some(peer) => peer.lock(),
                         None => continue,
                     };
+
+                    #[cfg(feature = "payment")]
+                    if let Some(ref quota) = peer.quota {
+                        if quota.is_blocked() {
+                            continue;
+                        }
+                        if !quota.consume(src.len() as u64) {
+                            tracing::info!("Peer quota exhausted (outbound)");
+                            continue;
+                        }
+                    }
 
                     match peer.tunnel.encapsulate(src, &mut t.dst_buf[..]) {
                         TunnResult::Done => {}

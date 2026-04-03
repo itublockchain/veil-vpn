@@ -8,6 +8,9 @@
 #[cfg(feature = "device")]
 pub mod device;
 
+#[cfg(feature = "payment")]
+pub mod payment;
+
 #[cfg(feature = "ffi-bindings")]
 pub mod ffi;
 #[cfg(feature = "jni-bindings")]
