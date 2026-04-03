@@ -55,6 +55,12 @@ const HANDSHAKE_RATE_LIMIT: u64 = 100; // The number of handshakes per second we
 const MAX_UDP_SIZE: usize = (1 << 16) - 1;
 const MAX_ITR: usize = 100; // Number of packets to handle per handler call
 
+/// Buffer size for encapsulating payment signal packets.
+/// Payment TLV payloads are at most ~200 bytes, plus 28 bytes IPv4/UDP header,
+/// plus ~48 bytes WireGuard overhead. 512 bytes is more than sufficient.
+#[cfg(feature = "payment")]
+const MAX_PAYMENT_PACKET_SIZE: usize = 512;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("i/o error: {0}")]
@@ -155,6 +161,11 @@ pub struct Device {
     mtu: AtomicUsize,
 
     rate_limiter: Option<Arc<RateLimiter>>,
+
+    #[cfg(feature = "payment")]
+    payment_wallet: Option<Arc<crate::payment::wallet::PaymentWallet>>,
+    #[cfg(feature = "payment")]
+    payment_config: crate::payment::PaymentConfig,
 
     #[cfg(target_os = "linux")]
     uapi_fd: i32,
@@ -388,6 +399,10 @@ impl Device {
             cleanup_paths: Default::default(),
             mtu: AtomicUsize::new(mtu),
             rate_limiter: None,
+            #[cfg(feature = "payment")]
+            payment_wallet: None,
+            #[cfg(feature = "payment")]
+            payment_config: Default::default(),
             #[cfg(target_os = "linux")]
             uapi_fd,
         };
@@ -486,7 +501,9 @@ impl Device {
         {
             let key_bytes = private_key.to_bytes();
             let wallet = crate::payment::wallet::PaymentWallet::from_wireguard_key(&key_bytes);
-            tracing::info!("Payment wallet: {}", wallet.ethereum_address_hex());
+            let role = if self.payment_config.is_server { "server" } else { "client" };
+            tracing::info!("Payment mode: {} | wallet: {}", role, wallet.ethereum_address_hex());
+            self.payment_wallet = Some(Arc::new(wallet));
         }
     }
 
@@ -669,31 +686,63 @@ impl Device {
                             flush = true;
                             let _: Result<_, _> = udp.send_to(packet, &addr);
                         }
-                        TunnResult::WriteToTunnelV4(packet, addr) => {
-                            if p.is_allowed_ip(addr) {
-                                #[cfg(feature = "payment")]
-                                if let Some(ref quota) = p.quota {
-                                    if quota.is_blocked() {
-                                        continue;
+                        TunnResult::WriteToTunnelV4(packet, src_ip) => {
+                            // Payment signals use virtual IP 169.254.254.1 which won't
+                            // be in any peer's allowed-ips. Check BEFORE allowed-ip filter.
+                            #[cfg(feature = "payment")]
+                            {
+                                use crate::payment::protocol;
+                                if protocol::is_payment_signal(packet) {
+                                    if let Some(payload) = protocol::extract_signal_payload(packet) {
+                                        if let Some(dst) = protocol::dst_ipv4(packet) {
+                                            if dst == protocol::PAYMENT_GATEWAY_IP {
+                                                // Client → Server: PaymentSubmit
+                                                Self::handle_payment_submit(d, &mut p, payload, &udp, &addr);
+                                            } else if let Some(src) = protocol::src_ipv4(packet) {
+                                                if src == protocol::PAYMENT_GATEWAY_IP {
+                                                    // Server → Client: handle on client side
+                                                    Self::handle_payment_signal_client(d, &mut p, payload, &udp, &addr);
+                                                }
+                                            }
+                                        }
                                     }
-                                    if !quota.consume(packet.len() as u64) {
-                                        tracing::info!("Peer quota exhausted (udp inbound v4)");
-                                        continue;
+                                    continue;
+                                }
+                            }
+                            if p.is_allowed_ip(src_ip) {
+                                #[cfg(feature = "payment")]
+                                {
+                                    // Quota enforcement — only when this node is the server
+                                    if d.payment_config.is_server {
+                                        if let Some(ref quota) = p.quota {
+                                            if quota.is_blocked() {
+                                                continue;
+                                            }
+                                            if !quota.consume(packet.len() as u64) {
+                                                tracing::info!("Peer quota exhausted (udp inbound v4)");
+                                                Self::send_payment_required(d, &mut p, &udp, &addr);
+                                                continue;
+                                            }
+                                        }
                                     }
                                 }
+                                #[cfg(not(feature = "payment"))]
+                                let _ = &d; // suppress unused warning
                                 t.iface.write4(packet);
                             }
                         }
                         TunnResult::WriteToTunnelV6(packet, addr) => {
                             if p.is_allowed_ip(addr) {
                                 #[cfg(feature = "payment")]
-                                if let Some(ref quota) = p.quota {
-                                    if quota.is_blocked() {
-                                        continue;
-                                    }
-                                    if !quota.consume(packet.len() as u64) {
-                                        tracing::info!("Peer quota exhausted (udp inbound v6)");
-                                        continue;
+                                if d.payment_config.is_server {
+                                    if let Some(ref quota) = p.quota {
+                                        if quota.is_blocked() {
+                                            continue;
+                                        }
+                                        if !quota.consume(packet.len() as u64) {
+                                            tracing::info!("Peer quota exhausted (udp inbound v6)");
+                                            continue;
+                                        }
                                     }
                                 }
                                 t.iface.write6(packet);
@@ -740,7 +789,7 @@ impl Device {
     ) -> Result<(), Error> {
         self.queue.new_event(
             udp.as_raw_fd(),
-            Box::new(move |_, t| {
+            Box::new(move |d, t| {
                 // The conn_handler handles packet received from a connected UDP socket, associated
                 // with a known peer, this saves us the hustle of finding the right peer. If another
                 // peer gets the same ip, it will be ignored until the socket does not expire.
@@ -767,15 +816,49 @@ impl Device {
                             let _: Result<_, _> = udp.send(packet);
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
+                            // Payment signals use virtual IP 169.254.254.1 which won't
+                            // be in any peer's allowed-ips. Check BEFORE allowed-ip filter.
+                            #[cfg(feature = "payment")]
+                            {
+                                use crate::payment::protocol;
+                                if protocol::is_payment_signal(packet) {
+                                    if let Some(payload) = protocol::extract_signal_payload(packet) {
+                                        if let Some(dst) = protocol::dst_ipv4(packet) {
+                                            if dst == protocol::PAYMENT_GATEWAY_IP {
+                                                let sock_addr = socket2::SockAddr::from(
+                                                    p.endpoint().addr.unwrap()
+                                                );
+                                                Self::handle_payment_submit(d, &mut p, payload, &udp, &sock_addr);
+                                            } else if let Some(src) = protocol::src_ipv4(packet) {
+                                                if src == protocol::PAYMENT_GATEWAY_IP {
+                                                    let sock_addr = socket2::SockAddr::from(
+                                                        p.endpoint().addr.unwrap()
+                                                    );
+                                                    Self::handle_payment_signal_client(d, &mut p, payload, &udp, &sock_addr);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
                             if p.is_allowed_ip(addr) {
                                 #[cfg(feature = "payment")]
-                                if let Some(ref quota) = p.quota {
-                                    if quota.is_blocked() {
-                                        continue;
-                                    }
-                                    if !quota.consume(packet.len() as u64) {
-                                        tracing::info!("Peer quota exhausted (conn inbound v4)");
-                                        continue;
+                                {
+                                    if d.payment_config.is_server {
+                                        if let Some(ref quota) = p.quota {
+                                            if quota.is_blocked() {
+                                                continue;
+                                            }
+                                            if !quota.consume(packet.len() as u64) {
+                                                tracing::info!("Peer quota exhausted (conn inbound v4)");
+                                                let sock_addr = socket2::SockAddr::from(
+                                                    p.endpoint().addr.unwrap()
+                                                );
+                                                Self::send_payment_required(d, &mut p, &udp, &sock_addr);
+                                                continue;
+                                            }
+                                        }
                                     }
                                 }
                                 iface.write4(packet);
@@ -784,13 +867,15 @@ impl Device {
                         TunnResult::WriteToTunnelV6(packet, addr) => {
                             if p.is_allowed_ip(addr) {
                                 #[cfg(feature = "payment")]
-                                if let Some(ref quota) = p.quota {
-                                    if quota.is_blocked() {
-                                        continue;
-                                    }
-                                    if !quota.consume(packet.len() as u64) {
-                                        tracing::info!("Peer quota exhausted (conn inbound v6)");
-                                        continue;
+                                if d.payment_config.is_server {
+                                    if let Some(ref quota) = p.quota {
+                                        if quota.is_blocked() {
+                                            continue;
+                                        }
+                                        if !quota.consume(packet.len() as u64) {
+                                            tracing::info!("Peer quota exhausted (conn inbound v6)");
+                                            continue;
+                                        }
                                     }
                                 }
                                 iface.write6(packet);
@@ -862,13 +947,15 @@ impl Device {
                     };
 
                     #[cfg(feature = "payment")]
-                    if let Some(ref quota) = peer.quota {
-                        if quota.is_blocked() {
-                            continue;
-                        }
-                        if !quota.consume(src.len() as u64) {
-                            tracing::info!("Peer quota exhausted (outbound)");
-                            continue;
+                    if d.payment_config.is_server {
+                        if let Some(ref quota) = peer.quota {
+                            if quota.is_blocked() {
+                                continue; // Don't encapsulate if peer is blocked
+                            }
+                            // Count outbound bytes but don't trigger blocking here.
+                            // Blocking and PaymentRequired are handled on inbound only
+                            // (the side receiving traffic is the one that enforces).
+                            quota.consume(src.len() as u64);
                         }
                     }
 
@@ -897,6 +984,269 @@ impl Device {
             }),
         )?;
         Ok(())
+    }
+
+    #[cfg(feature = "payment")]
+    fn send_payment_required(
+        d: &LockReadGuard<'_, Device>,
+        p: &mut parking_lot::MutexGuard<'_, Peer>,
+        udp: &socket2::Socket,
+        addr: &socket2::SockAddr,
+    ) {
+        use crate::payment::protocol::*;
+
+        let wallet = match d.payment_wallet.as_ref() {
+            Some(w) => w,
+            None => return,
+        };
+
+        // Get peer's tunnel IP from allowed_ips
+        let peer_ip = match p.allowed_ips().next() {
+            Some((IpAddr::V4(ip), _)) => ip,
+            _ => return,
+        };
+
+        // Generate random nonce
+        let mut nonce = [0u8; 32];
+        use rand_core::{OsRng, RngCore};
+        OsRng.fill_bytes(&mut nonce);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let msg = PaymentRequired {
+            amount_usdc: d.payment_config.amount_per_quota,
+            nonce,
+            recipient: wallet.ethereum_address(),
+            deadline: now + 300,
+            chain_id: d.payment_config.chain_id,
+            usdc_contract: d.payment_config.usdc_contract,
+        };
+
+        let tlv = msg.encode();
+        let ip_packet = build_signal_packet(PAYMENT_GATEWAY_IP, peer_ip, &tlv);
+
+        let mut enc_buf = [0u8; MAX_PAYMENT_PACKET_SIZE];
+        match p.tunnel.encapsulate(&ip_packet, &mut enc_buf) {
+            TunnResult::WriteToNetwork(enc) => {
+                let _: Result<_, _> = udp.send_to(enc, addr);
+                tracing::info!("PaymentRequired sent to peer {}", peer_ip);
+            }
+            TunnResult::Err(e) => tracing::error!("Failed to encapsulate PaymentRequired: {:?}", e),
+            _ => tracing::warn!("Unexpected encapsulate result for PaymentRequired (no active session?)"),
+        }
+    }
+
+    #[cfg(feature = "payment")]
+    fn handle_payment_submit(
+        d: &LockReadGuard<'_, Device>,
+        p: &mut parking_lot::MutexGuard<'_, Peer>,
+        payload: &[u8],
+        udp: &socket2::Socket,
+        addr: &socket2::SockAddr,
+    ) {
+        use crate::payment::protocol::*;
+        use crate::payment::eip3009;
+
+        let wallet = match d.payment_wallet.as_ref() {
+            Some(w) => w,
+            None => return,
+        };
+
+        let submit = match PaymentSubmit::decode(payload) {
+            Some(s) => s,
+            None => {
+                tracing::warn!("Invalid PaymentSubmit payload");
+                return;
+            }
+        };
+
+        // Verify: `to` must be server's address
+        if submit.to != wallet.ethereum_address() {
+            tracing::warn!("PaymentSubmit: wrong recipient");
+            return;
+        }
+
+        // Verify: value must be >= required amount
+        if submit.value < d.payment_config.amount_per_quota {
+            tracing::warn!("PaymentSubmit: insufficient amount");
+            return;
+        }
+
+        // Verify EIP-3009 signature
+        let domain = eip3009::Eip712Domain {
+            name: d.payment_config.usdc_name.clone(),
+            version: d.payment_config.usdc_version.clone(),
+            chain_id: d.payment_config.chain_id,
+            verifying_contract: d.payment_config.usdc_contract,
+        };
+
+        let auth = eip3009::TransferAuthorization {
+            from: submit.from,
+            to: submit.to,
+            value: submit.value,
+            valid_after: submit.valid_after,
+            valid_before: submit.valid_before,
+            nonce: submit.nonce,
+        };
+
+        let signed = eip3009::SignedAuthorization {
+            auth,
+            v: submit.v,
+            r: submit.r,
+            s: submit.s,
+        };
+
+        let recovered = match eip3009::verify_authorization(&domain, &signed) {
+            Some(addr) => addr,
+            None => {
+                tracing::warn!("PaymentSubmit: invalid signature");
+                return;
+            }
+        };
+
+        if recovered != submit.from {
+            tracing::warn!("PaymentSubmit: signer mismatch");
+            return;
+        }
+
+        // Payment verified — credit quota
+        if let Some(ref quota) = p.quota {
+            quota.credit(d.payment_config.quota_bytes);
+            tracing::info!(
+                "Payment verified from 0x{}, quota credited {}MB",
+                hex::encode(submit.from),
+                d.payment_config.quota_bytes / 1024 / 1024
+            );
+        }
+
+        // Send PaymentAccepted back
+        let peer_ip = match p.allowed_ips().next() {
+            Some((IpAddr::V4(ip), _)) => ip,
+            _ => return,
+        };
+
+        let accepted = PaymentAccepted {
+            new_quota_bytes: d.payment_config.quota_bytes,
+        };
+        let tlv = accepted.encode();
+        let ip_packet = build_signal_packet(PAYMENT_GATEWAY_IP, peer_ip, &tlv);
+
+        let mut enc_buf = [0u8; MAX_PAYMENT_PACKET_SIZE];
+        match p.tunnel.encapsulate(&ip_packet, &mut enc_buf) {
+            TunnResult::WriteToNetwork(enc) => {
+                let _: Result<_, _> = udp.send_to(enc, addr);
+                tracing::info!("PaymentAccepted sent to peer {}", peer_ip);
+            }
+            TunnResult::Err(e) => tracing::error!("Failed to encapsulate PaymentAccepted: {:?}", e),
+            _ => tracing::warn!("Unexpected encapsulate result for PaymentAccepted (no active session?)"),
+        }
+    }
+
+    #[cfg(feature = "payment")]
+    fn handle_payment_signal_client(
+        d: &LockReadGuard<'_, Device>,
+        p: &mut parking_lot::MutexGuard<'_, Peer>,
+        payload: &[u8],
+        udp: &socket2::Socket,
+        addr: &socket2::SockAddr,
+    ) {
+        use crate::payment::protocol::*;
+
+        if payload.is_empty() {
+            return;
+        }
+
+        match payload[0] {
+            MSG_PAYMENT_REQUIRED => {
+                let req = match PaymentRequired::decode(payload) {
+                    Some(r) => r,
+                    None => return,
+                };
+
+                let wallet = match d.payment_wallet.as_ref() {
+                    Some(w) => w,
+                    None => {
+                        tracing::warn!("PaymentRequired received but no wallet configured");
+                        return;
+                    }
+                };
+
+                tracing::info!(
+                    "PaymentRequired received: {} USDC to 0x{}",
+                    req.amount_usdc,
+                    hex::encode(req.recipient)
+                );
+
+                // Auto-sign EIP-3009 authorization
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                let domain = crate::payment::eip3009::Eip712Domain {
+                    name: d.payment_config.usdc_name.clone(),
+                    version: d.payment_config.usdc_version.clone(),
+                    chain_id: req.chain_id,
+                    verifying_contract: req.usdc_contract,
+                };
+
+                let auth = crate::payment::eip3009::TransferAuthorization {
+                    from: wallet.ethereum_address(),
+                    to: req.recipient,
+                    value: req.amount_usdc,
+                    valid_after: now.saturating_sub(60),
+                    valid_before: req.deadline,
+                    nonce: req.nonce,
+                };
+
+                let digest = crate::payment::eip3009::compute_eip712_digest(&domain, &auth);
+                let (v, r, s) = wallet.sign_digest(&digest);
+
+                let submit = PaymentSubmit {
+                    from: wallet.ethereum_address(),
+                    to: req.recipient,
+                    value: req.amount_usdc,
+                    valid_after: now.saturating_sub(60),
+                    valid_before: req.deadline,
+                    nonce: req.nonce,
+                    v,
+                    r,
+                    s,
+                };
+
+                // Get server tunnel IP (we send TO 169.254.254.1)
+                let tlv = submit.encode();
+                let client_ip = match p.allowed_ips().next() {
+                    Some((IpAddr::V4(ip), _)) => ip,
+                    _ => return,
+                };
+                let ip_packet = build_signal_packet(client_ip, PAYMENT_GATEWAY_IP, &tlv);
+
+                let mut enc_buf = [0u8; MAX_PAYMENT_PACKET_SIZE];
+                match p.tunnel.encapsulate(&ip_packet, &mut enc_buf) {
+                    TunnResult::WriteToNetwork(enc) => {
+                        let _: Result<_, _> = udp.send_to(enc, addr);
+                        tracing::info!("PaymentSubmit sent (auto-signed)");
+                    }
+                    TunnResult::Err(e) => tracing::error!("Failed to encapsulate PaymentSubmit: {:?}", e),
+                    _ => tracing::warn!("Unexpected encapsulate result for PaymentSubmit (no active session?)"),
+                }
+            }
+            MSG_PAYMENT_ACCEPTED => {
+                if let Some(accepted) = PaymentAccepted::decode(payload) {
+                    tracing::info!(
+                        "PaymentAccepted: quota renewed {}MB",
+                        accepted.new_quota_bytes / 1024 / 1024
+                    );
+                }
+            }
+            _ => {
+                tracing::debug!("Unknown payment signal type: 0x{:02x}", payload[0]);
+            }
+        }
     }
 }
 
