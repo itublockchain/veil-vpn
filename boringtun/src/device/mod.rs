@@ -952,10 +952,6 @@ impl Device {
                             if quota.is_blocked() {
                                 continue; // Don't encapsulate if peer is blocked
                             }
-                            // Count outbound bytes but don't trigger blocking here.
-                            // Blocking and PaymentRequired are handled on inbound only
-                            // (the side receiving traffic is the one that enforces).
-                            quota.consume(src.len() as u64);
                         }
                     }
 
