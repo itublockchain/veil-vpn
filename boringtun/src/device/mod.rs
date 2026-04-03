@@ -166,6 +166,8 @@ pub struct Device {
     payment_wallet: Option<Arc<crate::payment::wallet::PaymentWallet>>,
     #[cfg(feature = "payment")]
     payment_config: crate::payment::PaymentConfig,
+    #[cfg(feature = "payment")]
+    settlement_client: Option<crate::payment::settlement::SettlementClient>,
 
     #[cfg(target_os = "linux")]
     uapi_fd: i32,
@@ -403,6 +405,8 @@ impl Device {
             payment_wallet: None,
             #[cfg(feature = "payment")]
             payment_config: Default::default(),
+            #[cfg(feature = "payment")]
+            settlement_client: None,
             #[cfg(target_os = "linux")]
             uapi_fd,
         };
@@ -502,8 +506,19 @@ impl Device {
             let key_bytes = private_key.to_bytes();
             let wallet = crate::payment::wallet::PaymentWallet::from_wireguard_key(&key_bytes);
             let role = if self.payment_config.is_server { "server" } else { "client" };
-            tracing::info!("Payment mode: {} | wallet: {}", role, wallet.ethereum_address_hex());
+            tracing::info!(
+                "Payment mode: {} | chain: {} | wallet: {}",
+                role, self.payment_config.chain_id, wallet.ethereum_address_hex()
+            );
             self.payment_wallet = Some(Arc::new(wallet));
+            if self.payment_config.is_server {
+                self.settlement_client = Some(
+                    crate::payment::settlement::SettlementClient::new(
+                        &self.payment_config.gateway_api_url,
+                    ),
+                );
+                tracing::info!("Settlement client: {}", self.payment_config.gateway_api_url);
+            }
         }
     }
 
@@ -1071,13 +1086,16 @@ impl Device {
             return;
         }
 
-        // Verify EIP-3009 signature
-        let domain = eip3009::Eip712Domain {
-            name: d.payment_config.usdc_name.clone(),
-            version: d.payment_config.usdc_version.clone(),
-            chain_id: d.payment_config.chain_id,
-            verifying_contract: d.payment_config.usdc_contract,
-        };
+        // Nonce replay check (before any expensive operations)
+        if let Some(ref quota) = p.quota {
+            if !quota.check_and_record_nonce(&submit.nonce) {
+                tracing::warn!("PaymentSubmit: nonce replay detected");
+                return;
+            }
+        }
+
+        // Verify EIP-3009 signature (against GatewayWalletBatched domain)
+        let domain = d.payment_config.gateway_domain();
 
         let auth = eip3009::TransferAuthorization {
             from: submit.from,
@@ -1108,14 +1126,69 @@ impl Device {
             return;
         }
 
-        // Payment verified — credit quota
-        if let Some(ref quota) = p.quota {
-            quota.credit(d.payment_config.quota_bytes);
-            tracing::info!(
-                "Payment verified from 0x{}, quota credited {}MB",
-                hex::encode(submit.from),
-                d.payment_config.quota_bytes / 1024 / 1024
-            );
+        // Settle via Circle Gateway API
+        let settlement_client = match d.settlement_client.as_ref() {
+            Some(c) => c,
+            None => {
+                tracing::warn!("No settlement client — crediting quota without settlement");
+                // Fallback: credit without settlement (for local testing without API)
+                if let Some(ref quota) = p.quota {
+                    quota.credit(d.payment_config.quota_bytes);
+                    tracing::info!(
+                        "Payment locally verified from 0x{}, quota credited {}MB",
+                        hex::encode(submit.from),
+                        d.payment_config.quota_bytes / 1024 / 1024
+                    );
+                }
+                // Skip to sending PaymentAccepted
+                let peer_ip = match p.allowed_ips().next() {
+                    Some((IpAddr::V4(ip), _)) => ip,
+                    _ => return,
+                };
+                let accepted = PaymentAccepted { new_quota_bytes: d.payment_config.quota_bytes };
+                let tlv = accepted.encode();
+                let ip_packet = build_signal_packet(PAYMENT_GATEWAY_IP, peer_ip, &tlv);
+                let mut enc_buf = [0u8; MAX_PAYMENT_PACKET_SIZE];
+                if let TunnResult::WriteToNetwork(enc) = p.tunnel.encapsulate(&ip_packet, &mut enc_buf) {
+                    let _: Result<_, _> = udp.send_to(enc, addr);
+                    tracing::info!("PaymentAccepted sent to peer {}", peer_ip);
+                }
+                return;
+            }
+        };
+
+        let settle_req = crate::payment::settlement::build_settle_request(
+            &d.payment_config,
+            &submit,
+            &wallet.ethereum_address(),
+        );
+
+        match settlement_client.settle(&settle_req) {
+            Ok(resp) if resp.success => {
+                tracing::info!(
+                    "Settlement OK: tx={:?}, payer=0x{}",
+                    resp.transaction.as_deref().unwrap_or("?"),
+                    hex::encode(submit.from)
+                );
+                if let Some(ref quota) = p.quota {
+                    quota.credit(d.payment_config.quota_bytes);
+                    tracing::info!(
+                        "Quota credited {}MB after settlement",
+                        d.payment_config.quota_bytes / 1024 / 1024
+                    );
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "Settlement REJECTED: reason={:?} msg={:?}",
+                    resp.error_reason, resp.error_message
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!("Settlement ERROR: {}", e);
+                return;
+            }
         }
 
         // Send PaymentAccepted back
@@ -1182,12 +1255,8 @@ impl Device {
                     .unwrap()
                     .as_secs();
 
-                let domain = crate::payment::eip3009::Eip712Domain {
-                    name: d.payment_config.usdc_name.clone(),
-                    version: d.payment_config.usdc_version.clone(),
-                    chain_id: req.chain_id,
-                    verifying_contract: req.usdc_contract,
-                };
+                // Sign against GatewayWalletBatched domain (for Circle nanopayments)
+                let domain = d.payment_config.gateway_domain();
 
                 let auth = crate::payment::eip3009::TransferAuthorization {
                     from: wallet.ethereum_address(),

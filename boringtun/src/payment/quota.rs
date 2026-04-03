@@ -1,4 +1,7 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use parking_lot::Mutex;
 
 pub const DEFAULT_QUOTA_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 
@@ -7,6 +10,7 @@ pub struct BandwidthQuota {
     blocked: AtomicBool,
     total_consumed: AtomicU64,
     payment_count: AtomicU64,
+    used_nonces: Mutex<HashSet<[u8; 32]>>,
 }
 
 impl BandwidthQuota {
@@ -16,6 +20,7 @@ impl BandwidthQuota {
             blocked: AtomicBool::new(false),
             total_consumed: AtomicU64::new(0),
             payment_count: AtomicU64::new(0),
+            used_nonces: Mutex::new(HashSet::new()),
         }
     }
 
@@ -42,6 +47,12 @@ impl BandwidthQuota {
         self.remaining_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.payment_count.fetch_add(1, Ordering::Relaxed);
         self.blocked.store(false, Ordering::Release);
+    }
+
+    /// Check if a nonce has been used. If not, records it and returns true.
+    /// Returns false if the nonce was already used (replay attempt).
+    pub fn check_and_record_nonce(&self, nonce: &[u8; 32]) -> bool {
+        self.used_nonces.lock().insert(*nonce)
     }
 
     pub fn is_blocked(&self) -> bool {
@@ -113,5 +124,17 @@ mod tests {
         assert_eq!(q.payment_count(), 1);
 
         assert!(q.consume(1000));
+    }
+
+    #[test]
+    fn test_nonce_replay_protection() {
+        let q = BandwidthQuota::new(1000);
+        let nonce = [0xAB; 32];
+
+        assert!(q.check_and_record_nonce(&nonce));  // first use: OK
+        assert!(!q.check_and_record_nonce(&nonce)); // replay: rejected
+
+        let nonce2 = [0xCD; 32];
+        assert!(q.check_and_record_nonce(&nonce2)); // different nonce: OK
     }
 }
