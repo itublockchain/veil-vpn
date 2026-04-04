@@ -222,6 +222,65 @@ fn uapi_remove_peer(tun_name: &str, pubkey_hex: &str) -> Result<bool, String> {
     Ok(response.trim() == "errno=0")
 }
 
+// === Kernel Route Management ===
+
+/// Add a /32 host route for a client IP via the TUN interface.
+/// Without this, the kernel has no route to deliver decrypted response packets
+/// back into the tunnel (since we use /32 on the interface to prevent loops).
+fn add_kernel_route(tun_name: &str, ip: Ipv4Addr) {
+    let result = if cfg!(target_os = "linux") {
+        std::process::Command::new("ip")
+            .args(["route", "add", &format!("{}/32", ip), "dev", tun_name])
+            .output()
+    } else {
+        std::process::Command::new("route")
+            .args(["add", "-host", &ip.to_string(), "-interface", tun_name])
+            .output()
+    };
+    match result {
+        Ok(out) if out.status.success() => {
+            tracing::info!(ip = %ip, tun = %tun_name, "Kernel route added");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // "File exists" / "RTNETLINK: File exists" means route already present — not an error
+            if stderr.contains("exist") {
+                tracing::debug!(ip = %ip, "Kernel route already exists");
+            } else {
+                tracing::warn!(ip = %ip, stderr = %stderr, "Failed to add kernel route");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(ip = %ip, error = %e, "Failed to run route command");
+        }
+    }
+}
+
+/// Remove a /32 host route when a peer is reaped.
+fn remove_kernel_route(tun_name: &str, ip: Ipv4Addr) {
+    let result = if cfg!(target_os = "linux") {
+        std::process::Command::new("ip")
+            .args(["route", "del", &format!("{}/32", ip), "dev", tun_name])
+            .output()
+    } else {
+        std::process::Command::new("route")
+            .args(["delete", "-host", &ip.to_string(), "-interface", tun_name])
+            .output()
+    };
+    match result {
+        Ok(out) if out.status.success() => {
+            tracing::info!(ip = %ip, tun = %tun_name, "Kernel route removed");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::debug!(ip = %ip, stderr = %stderr, "Kernel route removal note");
+        }
+        Err(e) => {
+            tracing::warn!(ip = %ip, error = %e, "Failed to run route delete command");
+        }
+    }
+}
+
 // === Registration Handler ===
 
 fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, String) {
@@ -269,6 +328,8 @@ fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, 
                 state.subnet_prefix[2],
                 octet,
             );
+            // Re-ensure kernel route exists (may be lost after server restart)
+            add_kernel_route(&state.tun_name, ip);
             return (200, build_success_response(
                 ip, &state.payment_config, &state.public_ip,
                 inner.server_pubkey_cache.as_deref().unwrap_or(""),
@@ -299,6 +360,9 @@ fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, 
             inner.registered_peers.insert(pubkey_hex.clone());
             inner.peer_to_octet.insert(pubkey_hex.clone(), octet);
             inner.peer_registered_at.insert(pubkey_hex.clone(), Instant::now());
+
+            // Add kernel route so the OS knows how to reach this client via the TUN
+            add_kernel_route(&state.tun_name, assigned_ip);
 
             tracing::info!(
                 pubkey = %pubkey_hex,
@@ -527,15 +591,23 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
             match uapi_remove_peer(&state.tun_name, pubkey_hex) {
                 Ok(true) => {
                     // errno=0 — safe to update state
+                    let ip = Ipv4Addr::new(
+                        state.subnet_prefix[0],
+                        state.subnet_prefix[1],
+                        state.subnet_prefix[2],
+                        *octet,
+                    );
+                    remove_kernel_route(&state.tun_name, ip);
+
                     inner.available_ips.insert(*octet);
                     inner.registered_peers.remove(pubkey_hex);
                     inner.peer_to_octet.remove(pubkey_hex);
                     inner.peer_registered_at.remove(pubkey_hex);
                     tracing::info!(
                         pubkey = %pubkey_hex,
-                        octet = octet,
+                        ip = %ip,
                         pool_remaining = inner.available_ips.len(),
-                        "Reaper: removed stale peer"
+                        "Reaper: removed stale peer + kernel route"
                     );
                 }
                 Ok(false) => {

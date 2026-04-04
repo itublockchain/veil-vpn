@@ -68,7 +68,11 @@ pub fn run_ws_bridge(
                         tracing::warn!("WS bridge: UDP→WS send error: {}, reconnecting", e);
                         break;
                     }
-                    tracing::debug!("WS bridge: UDP→WS #{} | {} bytes", udp_to_ws, n);
+                    tracing::info!(
+                        "WS bridge: UDP→WS #{} | {} bytes from {} | first4=[{:02x}{:02x}{:02x}{:02x}]",
+                        udp_to_ws, n, from,
+                        udp_buf[0], udp_buf[1.min(n-1)], udp_buf[2.min(n-1)], udp_buf[3.min(n-1)]
+                    );
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
@@ -86,7 +90,11 @@ pub fn run_ws_bridge(
                         if let Err(e) = udp.send_to(&data, addr) {
                             tracing::warn!("WS bridge: WS→UDP send error: {}", e);
                         } else {
-                            tracing::debug!("WS bridge: WS→UDP #{} | {} bytes → {}", ws_to_udp, data.len(), addr);
+                            tracing::info!(
+                                "WS bridge: WS→UDP #{} | {} bytes → {} | first4=[{:02x}{:02x}{:02x}{:02x}]",
+                                ws_to_udp, data.len(), addr,
+                                data[0], data[1.min(data.len()-1)], data[2.min(data.len()-1)], data[3.min(data.len()-1)]
+                            );
                         }
                     } else {
                         tracing::warn!("WS bridge: WS→UDP #{} | dropped, no client yet", ws_to_udp);

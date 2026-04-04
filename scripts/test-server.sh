@@ -119,8 +119,12 @@ fi
 ifconfig "$UTUN_NAME" 10.0.0.1 10.0.0.2 up 2>/dev/null || \
     echo "WARNING: Could not assign IP (need sudo?)"
 
-# Route the VPN subnet through the tunnel so replies go back
-route add -net 10.0.0.0/24 -interface "$UTUN_NAME" 2>/dev/null || true
+# Route only assigned client IPs through the tunnel (NOT the whole /24).
+# A blanket /24 route causes a kernel-level routing loop for non-existent IPs
+# (packet goes to TUN → boringtun → back to TUN → repeat).
+# The HTTP API adds /32 routes per peer on registration; for local testing
+# we pre-add the first client IP.
+route add -host 10.0.0.2 -interface "$UTUN_NAME" 2>/dev/null || true
 
 # Enable IP forwarding and NAT for full tunnel support
 echo "[Setup] Enabling IP forwarding and NAT..."
