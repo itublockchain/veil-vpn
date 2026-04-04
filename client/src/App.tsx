@@ -28,6 +28,16 @@ interface HealthEvent {
   handshake_age_secs: number | null;
 }
 
+interface Server {
+  name: string;
+  region: string;
+  ip: string;
+}
+
+const SERVERS: Server[] = [
+  { name: "FRANKFURT", region: "EU", ip: "37.27.29.160" },
+];
+
 export default function App() {
   const [status, setStatus] = useState<VpnStatus>("disconnected");
   const [assignedIp, setAssignedIp] = useState<string | null>(null);
@@ -35,6 +45,9 @@ export default function App() {
   const [balance, setBalance] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthEvent | null>(null);
+  const [selectedServer, setSelectedServer] = useState<Server>(SERVERS[0]);
+  const [ensInput, setEnsInput] = useState("");
+  const [copied, setCopied] = useState(false);
 
   // Load wallet info on mount + auto-refresh every 3s
   useEffect(() => {
@@ -125,104 +138,119 @@ export default function App() {
   const isLoading = status === "connecting" || status === "disconnecting";
   const isConnected = status === "connected";
   const isError = status === "error";
-  const showDisconnect = isConnected || isError;
 
-  const buttonLabel = () => {
-    switch (status) {
-      case "connecting":
-        return "Connecting...";
-      case "disconnecting":
-        return "Disconnecting...";
-      case "connected":
-      case "error":
-        return "Disconnect";
-      default:
-        return "Connect";
-    }
-  };
-
-  const formatHandshake = (secs: number | null) => {
-    if (secs === null) return "no handshake";
-    if (secs < 60) return `${secs}s ago`;
-    return `${Math.floor(secs / 60)}m ago`;
+  const copyAddress = () => {
+    if (!walletAddress) return;
+    navigator.clipboard.writeText(walletAddress);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
 
   const shortAddr = (addr: string) =>
     `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 
-  return (
-    <div className="app">
-      <span className="corner corner-tl" />
-      <span className="corner corner-tr" />
-      <span className="corner corner-bl" />
-      <span className="corner corner-br" />
+  const formatBalance = (bal: string) => {
+    const num = parseFloat(bal);
+    if (isNaN(num)) return "0.00";
+    return num.toFixed(2);
+  };
 
-      {/* Status */}
-      <div className="status-section">
-        <div
-          className={`status-indicator ${isConnected ? "on" : ""} ${isError ? "err" : ""}`}
-        />
-        <span className="status-label">
-          {isConnected
-            ? "CONNECTED"
-            : isError
-              ? "ERROR"
-              : isLoading
-                ? "..."
-                : "DISCONNECTED"}
-        </span>
+  return (
+    <div className={`app ${isConnected ? "secured" : ""}`}>
+      {/* Header */}
+      <div className="header">
+        <span className="header-label">VEIL://VPN</span>
+        <span className="header-id">v0.1.0</span>
       </div>
 
-      {/* Assigned IP */}
-      {assignedIp && isConnected && (
-        <div className="connected-info">
-          <span className="connected-ip">{assignedIp}</span>
+      {/* Wallet section */}
+      {walletAddress && (
+        <div className="wallet-bar">
+          <div className="wallet-left">
+            <span className="wallet-label">WALLET</span>
+            <span className="wallet-addr" onClick={copyAddress} title="Click to copy">
+              {copied ? "COPIED" : shortAddr(walletAddress)}
+            </span>
+          </div>
+          <div className="wallet-right">
+            <span className="wallet-bal">{formatBalance(balance ?? "0")}</span>
+            <span className="wallet-unit">USDC</span>
+          </div>
         </div>
       )}
 
-      {/* Wallet info */}
-      {walletAddress && (
-        <div className="wallet-section">
-          <div
-            className="wallet-address copyable"
-            title="Click to copy"
-            onClick={() => {
-              navigator.clipboard.writeText(walletAddress!);
-            }}
-          >
-            {shortAddr(walletAddress)}
-          </div>
-          <div className="wallet-balance">
-            <span className="balance-value">{balance ?? "..."} USDC</span>
-            <button className="btn-refresh" onClick={refreshBalance} title="Refresh balance">
-              ↻
-            </button>
-          </div>
+      {/* Status bar */}
+      <div className={`status-bar ${isConnected ? "on" : ""} ${isError ? "err" : ""}`}>
+        <div className="status-left">
+          <span className={`status-dot ${isConnected ? "on" : ""} ${isError ? "err" : ""}`} />
+          <span className="status-text">
+            {isConnected ? "SECURED" : isError ? "ERROR" : isLoading ? "ROUTING..." : "UNSECURED"}
+          </span>
         </div>
-      )}
+        {assignedIp && isConnected && (
+          <span className="status-ip">{assignedIp}</span>
+        )}
+        {health && isConnected && health.handshake_age_secs !== null && (
+          <span className="status-ping">{health.handshake_age_secs}s</span>
+        )}
+      </div>
+
+      {/* Server list */}
+      <div className="section-label">NODES</div>
+      <div className="server-list">
+        {SERVERS.map((s) => (
+          <div
+            key={s.ip}
+            className={`server-row ${selectedServer.ip === s.ip ? "active" : ""}`}
+            onClick={() => !isConnected && setSelectedServer(s)}
+          >
+            <span className="server-name">{s.name}</span>
+            <span className="server-region">{s.region}</span>
+            <span className="server-ip">{s.ip}</span>
+            {selectedServer.ip === s.ip && <span className="server-dot" />}
+          </div>
+        ))}
+      </div>
+
+      {/* ENS input */}
+      <div className="ens-section">
+        <input
+          className="ens-input"
+          type="text"
+          placeholder="node.veil.eth"
+          value={ensInput}
+          onChange={(e) => setEnsInput(e.target.value)}
+          disabled={isConnected || isLoading}
+          spellCheck={false}
+        />
+      </div>
 
       {/* Error */}
-      {error && <div className="error-msg">! {error}</div>}
+      {error && <div className="error-bar">{error}</div>}
 
-      {/* Connect / Disconnect button */}
+      {/* Action button */}
       <button
-        className={`btn-connect ${showDisconnect ? "connected" : ""} ${isLoading ? "loading" : ""}`}
+        className={`btn-action ${isConnected || isError ? "disconnect" : ""} ${isLoading ? "loading" : ""}`}
         onClick={handleClick}
         disabled={isLoading}
       >
-        {isLoading && <span className="spinner" />}
-        <span>{buttonLabel()}</span>
+        {isLoading ? (
+          <>
+            <span className="spinner" />
+            <span>{status === "connecting" ? "ESTABLISHING" : "CLOSING"}</span>
+          </>
+        ) : isConnected || isError ? (
+          <span>DISCONNECT</span>
+        ) : (
+          <span>CONNECT</span>
+        )}
       </button>
 
-      {/* Health info */}
-      {health && isConnected && (
-        <div className="health-info">
-          <span className={`health-dot ${health.connected ? "ok" : "stale"}`} />
-          <span>handshake: {formatHandshake(health.handshake_age_secs)}</span>
-        </div>
-      )}
-
-      <div className="server-label">37.27.29.160</div>
+      {/* Footer */}
+      <div className="footer">
+        <span>PAY-AS-YOU-GO</span>
+        <span>0.01 USDC / 10MB</span>
+      </div>
     </div>
   );
 }
