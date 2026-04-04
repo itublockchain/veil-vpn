@@ -3,6 +3,9 @@ pub mod wallet;
 pub mod eip3009;
 pub mod protocol;
 pub mod settlement;
+pub mod rpc;
+pub mod tx;
+pub mod deposit;
 
 /// Payment configuration.
 #[derive(Clone)]

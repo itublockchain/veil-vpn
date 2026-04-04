@@ -36,8 +36,18 @@ pub struct SettleRequest {
 pub struct PaymentPayload {
     #[serde(rename = "x402Version")]
     pub x402_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<ResourceInfo>,
     pub accepted: PaymentRequirements,
     pub payload: PayloadData,
+}
+
+#[derive(Serialize)]
+pub struct ResourceInfo {
+    pub url: String,
+    pub description: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
 }
 
 #[derive(Serialize)]
@@ -87,11 +97,13 @@ pub struct SettleResponse {
     pub payer: Option<String>,
     pub transaction: Option<String>,
     pub network: Option<String>,
-    // Error fields (Circle returns these when success=false)
+    // Error fields — Circle uses different field names in different cases
     #[serde(rename = "errorReason")]
     pub error_reason: Option<String>,
     #[serde(rename = "errorMessage")]
     pub error_message: Option<String>,
+    pub message: Option<String>,
+    pub error: Option<String>,
 }
 
 // === Client ===
@@ -115,6 +127,12 @@ impl SettlementClient {
 
     pub fn settle(&self, request: &SettleRequest) -> Result<SettleResponse, SettlementError> {
         let url = format!("{}/v1/x402/settle", self.base_url);
+
+        // Log the request JSON for debugging
+        if let Ok(req_json) = serde_json::to_string(request) {
+            tracing::info!("Settlement request: {}", req_json);
+        }
+
         let resp = self
             .client
             .post(&url)
@@ -122,9 +140,15 @@ impl SettlementClient {
             .send()
             .map_err(|e| SettlementError::Http(e.to_string()))?;
 
-        let body = resp
-            .json::<SettleResponse>()
-            .map_err(|e| SettlementError::Json(e.to_string()))?;
+        let status = resp.status();
+        let raw_body = resp
+            .text()
+            .map_err(|e| SettlementError::Http(format!("read body: {}", e)))?;
+
+        tracing::info!("Settlement response [{}]: {}", status, raw_body);
+
+        let body: SettleResponse = serde_json::from_str(&raw_body)
+            .map_err(|e| SettlementError::Json(format!("{} — raw: {}", e, raw_body)))?;
 
         Ok(body)
     }
@@ -154,7 +178,7 @@ pub fn build_settle_request(
         asset: asset.clone(),
         amount: submit.value.to_string(),
         pay_to: pay_to.clone(),
-        max_timeout_seconds: 30,
+        max_timeout_seconds: 345_600, // 4 days — matches Circle Gateway requirement
         extra: extra.clone(),
     };
 
@@ -183,6 +207,11 @@ pub fn build_settle_request(
         x402_version: 2,
         payment_payload: PaymentPayload {
             x402_version: 2,
+            resource: Some(ResourceInfo {
+                url: "boringtun-vpn://bandwidth".to_string(),
+                description: "VPN bandwidth quota".to_string(),
+                mime_type: "application/octet-stream".to_string(),
+            }),
             accepted: requirements.clone(),
             payload,
         },

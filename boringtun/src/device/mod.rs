@@ -510,6 +510,14 @@ impl Device {
                 "Payment mode: {} | chain: {} | wallet: {}",
                 role, self.payment_config.chain_id, wallet.ethereum_address_hex()
             );
+            if !self.payment_config.is_server {
+                // Client: auto-deposit USDC into Gateway Wallet
+                match crate::payment::deposit::auto_deposit(&wallet, &self.payment_config) {
+                    Ok(ref result) if result == "already_deposited" => {}
+                    Ok(tx_hash) => tracing::info!("Gateway deposit confirmed: {}", tx_hash),
+                    Err(e) => tracing::warn!("Auto-deposit: {}", e),
+                }
+            }
             self.payment_wallet = Some(Arc::new(wallet));
             if self.payment_config.is_server {
                 self.settlement_client = Some(
@@ -1180,8 +1188,8 @@ impl Device {
             }
             Ok(resp) => {
                 tracing::warn!(
-                    "Settlement REJECTED: reason={:?} msg={:?}",
-                    resp.error_reason, resp.error_message
+                    "Settlement REJECTED: reason={:?} msg={:?} message={:?}",
+                    resp.error_reason, resp.error_message, resp.message
                 );
                 return;
             }
@@ -1262,8 +1270,8 @@ impl Device {
                     from: wallet.ethereum_address(),
                     to: req.recipient,
                     value: req.amount_usdc,
-                    valid_after: now.saturating_sub(60),
-                    valid_before: req.deadline,
+                    valid_after: 0,
+                    valid_before: now + 345_600, // 4 days (Circle Gateway requires min 3 days)
                     nonce: req.nonce,
                 };
 
@@ -1274,8 +1282,8 @@ impl Device {
                     from: wallet.ethereum_address(),
                     to: req.recipient,
                     value: req.amount_usdc,
-                    valid_after: now.saturating_sub(60),
-                    valid_before: req.deadline,
+                    valid_after: auth.valid_after,
+                    valid_before: auth.valid_before,
                     nonce: req.nonce,
                     v,
                     r,
