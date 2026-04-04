@@ -543,6 +543,16 @@ pub fn run_http_server(
                     Err(_) => (400, r#"{"error":"failed to read body"}"#.into()),
                 }
             }
+            // CORS preflight
+            (tiny_http::Method::Options, _) => {
+                let resp = tiny_http::Response::from_string("")
+                    .with_status_code(204)
+                    .with_header(tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap())
+                    .with_header(tiny_http::Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap())
+                    .with_header(tiny_http::Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap());
+                let _ = request.respond(resp);
+                continue;
+            }
             _ => (404, r#"{"error":"not found"}"#.into()),
         };
 
@@ -550,6 +560,9 @@ pub fn run_http_server(
             .with_status_code(status)
             .with_header(
                 tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
             );
         let _ = request.respond(resp);
     }
