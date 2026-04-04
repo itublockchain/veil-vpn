@@ -5,7 +5,7 @@
 }
 
 body {
-  background: #040b04;
+  background: transparent;
   color: #7dff7d;
   font-family: "SF Mono", "Fira Code", "Cascadia Code", Menlo, monospace;
   font-size: 12px;
@@ -25,6 +25,8 @@ body {
   position: relative;
   border: 1px solid #00ff4120;
   background: #040b04;
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 /* Scanline overlay */

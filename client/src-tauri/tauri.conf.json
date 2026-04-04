@@ -15,20 +15,15 @@
         "label": "main",
         "title": "VPN TEE",
         "width": 300,
-        "height": 300,
+        "height": 380,
         "resizable": false,
-        "decorations": true,
-        "alwaysOnTop": false,
-        "visible": true,
-        "skipTaskbar": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
         "shadow": true
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/tray.png",
-      "iconAsTemplate": true,
-      "tooltip": "VPN TEE"
-    },
     "security": {
       "csp": null
     }

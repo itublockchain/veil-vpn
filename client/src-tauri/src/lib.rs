@@ -1,8 +1,5 @@
 mod vpn;
 
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
-
 use tokio::sync::Mutex;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -114,24 +111,17 @@ struct WalletInfo {
 // ── App setup ─────────────────────────────────────────────────────────────────
 
 pub fn run() {
-    let last_click: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None));
-    let pending_handle: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>> =
-        Arc::new(StdMutex::new(None));
-
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             vpn: Mutex::new(VpnManager::new()),
         })
         .setup(move |app| {
-            let last_click = last_click.clone();
-            let pending_handle = pending_handle.clone();
-
             let _tray = TrayIconBuilder::new()
                 .tooltip("VPN TEE")
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
-                .on_tray_icon_event(move |tray, event| {
+                .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
@@ -139,34 +129,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let now = Instant::now();
-                        let is_double = {
-                            let mut last = last_click.lock().unwrap();
-                            let double = last
-                                .map(|t| now.duration_since(t) < Duration::from_millis(400))
-                                .unwrap_or(false);
-                            *last = Some(now);
-                            double
-                        };
-
-                        if is_double {
-                            if let Some(handle) = pending_handle.lock().unwrap().take() {
-                                handle.abort();
-                            }
-                            tray.app_handle().exit(0);
-                        } else {
-                            let app = tray.app_handle().clone();
-                            let click_pos = position;
-                            let handle = tokio::spawn(async move {
-                                tokio::time::sleep(Duration::from_millis(220)).await;
-                                toggle_window(&app, click_pos);
-                            });
-                            let mut lock = pending_handle.lock().unwrap();
-                            if let Some(old) = lock.take() {
-                                old.abort();
-                            }
-                            *lock = Some(handle);
-                        }
+                        toggle_window(tray.app_handle(), position);
                     }
                 })
                 .build(app)?;
@@ -175,6 +138,13 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(false) = event {
+                if window.label() == "main" {
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance, get_wallet_info])
         .run(tauri::generate_context!())
@@ -185,12 +155,8 @@ fn toggle_window(app: &tauri::AppHandle, tray_pos: PhysicalPosition<f64>) {
     if let Some(win) = app.get_webview_window("main") {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
-            #[cfg(target_os = "macos")]
-            let _ = app.hide();
         } else {
             position_below_tray(&win, tray_pos);
-            #[cfg(target_os = "macos")]
-            let _ = app.show();
             let _ = win.show();
             let _ = win.set_focus();
         }
