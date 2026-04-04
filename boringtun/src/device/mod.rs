@@ -975,7 +975,12 @@ impl Device {
                     if d.payment_config.is_server {
                         if let Some(ref quota) = peer.quota {
                             if quota.is_blocked() {
-                                continue; // Don't encapsulate if peer is blocked
+                                continue;
+                            }
+                            if !quota.consume(src.len() as u64) {
+                                tracing::info!("Peer quota exhausted (outbound)");
+                                // Send PaymentRequired via the inbound path next time
+                                continue;
                             }
                         }
                     }
