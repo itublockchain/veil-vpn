@@ -92,6 +92,12 @@ fn main() {
             Arg::new("disable-connected-udp")
                 .long("disable-connected-udp")
                 .help("Disable connected UDP sockets to each peer"),
+            Arg::new("ws-bind")
+                .long("ws-bind")
+                .takes_value(true)
+                .env("BT_WS_BIND")
+                .help("WebSocket proxy bind address (e.g. 0.0.0.0:8443)")
+                .default_value(""),
             #[cfg(target_os = "linux")]
             Arg::new("disable-multi-queue")
                 .long("disable-multi-queue")
@@ -252,6 +258,34 @@ fn main() {
                 .expect("Failed to spawn reaper thread");
 
             tracing::info!("Registration API on {}", bind_addr);
+
+            // WebSocket proxy thread
+            let ws_bind = std::env::var("BT_WS_BIND")
+                .unwrap_or_else(|_| matches.value_of("ws-bind").unwrap_or("").to_string());
+            if !ws_bind.is_empty() {
+                let wg_port: u16 = std::env::var("BT_WG_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(51820);
+                let shutdown_ws = Arc::clone(&shutdown_flag);
+                let ws_bind_log = ws_bind.clone();
+                std::thread::Builder::new()
+                    .name("ws-proxy".into())
+                    .spawn(move || {
+                        if let Err(e) = std::panic::catch_unwind(|| {
+                            boringtun::device::ws_proxy::run_ws_proxy(
+                                &ws_bind,
+                                wg_port,
+                                shutdown_ws,
+                            );
+                        }) {
+                            tracing::error!("WS proxy thread panicked: {:?}", e);
+                        }
+                    })
+                    .expect("Failed to spawn WS proxy thread");
+
+                tracing::info!("WebSocket proxy on {}", ws_bind_log);
+            }
         }
     }
 
