@@ -117,9 +117,11 @@ pub fn run() {
             vpn: Mutex::new(VpnManager::new()),
         })
         .setup(move |app| {
+            let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))
+                .expect("failed to load tray icon");
             let _tray = TrayIconBuilder::new()
-                .tooltip("VPN TEE")
-                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Veil VPN")
+                .icon(tray_icon)
                 .icon_as_template(true)
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {

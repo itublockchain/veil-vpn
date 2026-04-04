@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import logo from "./logo.svg";
 
 type VpnStatus =
   | "disconnected"
@@ -162,7 +163,7 @@ export default function App() {
     <div className={`app ${isConnected ? "secured" : ""}`}>
       {/* Header */}
       <div className="header">
-        <span className="header-label">VEIL://VPN</span>
+        <img src={logo} alt="VEIL" className="header-logo" />
         <div className={`header-status ${isConnected ? "on" : ""} ${isError ? "err" : ""}`}>
           <span className={`status-dot ${isConnected ? "on" : ""} ${isError ? "err" : ""}`} />
           <span className="header-status-text">
