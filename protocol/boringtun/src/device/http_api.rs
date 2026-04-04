@@ -33,6 +33,9 @@ pub struct RegistrationState {
     pub subnet_prefix: [u8; 3],
     pub payment_config: PaymentConfigSnapshot,
     pub public_ip: String,
+    pub world_rp_id: String,
+    pub world_action: String,
+    pub world_signing_key: Option<[u8; 32]>,
 }
 
 struct RegistrationInner {
@@ -81,6 +84,26 @@ impl RegistrationState {
         payment_config: PaymentConfigSnapshot,
         public_ip: String,
     ) -> Self {
+        // Parse World ID signing key from env
+        let world_signing_key = std::env::var("BT_WORLD_SIGNING_KEY").ok().and_then(|s| {
+            let s = s.strip_prefix("0x").unwrap_or(&s);
+            let bytes = hex::decode(s).ok()?;
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
+            } else {
+                None
+            }
+        });
+        let world_rp_id = std::env::var("BT_WORLD_RP_ID").unwrap_or_default();
+        let world_action = std::env::var("BT_WORLD_ACTION")
+            .unwrap_or_else(|_| "veil-vpn-connect".into());
+
+        if world_signing_key.is_some() {
+            tracing::info!("World ID RP signing enabled (rp_id={})", world_rp_id);
+        }
+
         let mut available_ips = HashSet::new();
         for octet in 2..=254u8 {
             available_ips.insert(octet);
@@ -99,6 +122,9 @@ impl RegistrationState {
             subnet_prefix,
             payment_config,
             public_ip,
+            world_rp_id,
+            world_action,
+            world_signing_key,
         }
     }
 }
@@ -353,6 +379,97 @@ fn extract_pubkey(body: &str) -> Option<String> {
 
 // === HTTP Server ===
 
+// ── World ID RP Context ──────────────────────────────────────────────────────
+
+fn handle_rp_context(state: &RegistrationState) -> (u16, String) {
+    let signing_key_bytes = match &state.world_signing_key {
+        Some(k) => k,
+        None => return (503, r#"{"error":"World ID not configured"}"#.into()),
+    };
+
+    let action = &state.world_action;
+    let rp_id = &state.world_rp_id;
+
+    match generate_rp_signature(signing_key_bytes, action) {
+        Ok((sig, nonce, created_at, expires_at)) => {
+            let body = format!(
+                r#"{{"rp_id":"{}","nonce":"{}","created_at":{},"expires_at":{},"signature":"{}","action":"{}"}}"#,
+                rp_id, nonce, created_at, expires_at, sig, action
+            );
+            (200, body)
+        }
+        Err(e) => (500, format!(r#"{{"error":"RP signature failed: {}"}}"#, e)),
+    }
+}
+
+fn generate_rp_signature(
+    signing_key_bytes: &[u8; 32],
+    action: &str,
+) -> Result<(String, String, u64, u64), String> {
+    use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
+    use sha3::{Digest, Keccak256};
+    use rand_core::{OsRng, RngCore};
+
+    let signing_key = SigningKey::from_bytes(signing_key_bytes.into())
+        .map_err(|e| format!("Invalid signing key: {e}"))?;
+
+    // Generate random nonce and hash_to_field it
+    let mut nonce_raw = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce_raw);
+    let nonce = hash_to_field(&nonce_raw);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let created_at = now;
+    let expires_at = now + 300; // 5 min TTL
+
+    // Hash the action
+    let action_hash = hash_to_field(action.as_bytes());
+
+    // Build message: version(1) || nonce(32) || created_at(8 BE) || expires_at(8 BE) || action_hash(32) = 81 bytes
+    let mut msg = Vec::with_capacity(81);
+    msg.push(0x01); // version
+    msg.extend_from_slice(&nonce);
+    msg.extend_from_slice(&created_at.to_be_bytes());
+    msg.extend_from_slice(&expires_at.to_be_bytes());
+    msg.extend_from_slice(&action_hash);
+
+    // EIP-191 prefix
+    let prefix = format!("\x19Ethereum Signed Message:\n{}", msg.len());
+    let mut prefixed = Vec::new();
+    prefixed.extend_from_slice(prefix.as_bytes());
+    prefixed.extend_from_slice(&msg);
+
+    let digest = Keccak256::digest(&prefixed);
+    let digest_arr: [u8; 32] = digest.into();
+
+    // Sign with recoverable ECDSA
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(&digest_arr)
+        .map_err(|e| format!("Signing failed: {e}"))?;
+
+    let sig_bytes = signature.to_bytes();
+    let mut sig_hex = Vec::with_capacity(65);
+    sig_hex.extend_from_slice(&sig_bytes); // r(32) || s(32)
+    sig_hex.push(recovery_id.to_byte() + 27); // v
+
+    let nonce_hex = format!("0x{}", hex::encode(&nonce));
+    let sig_out = format!("0x{}", hex::encode(&sig_hex));
+
+    Ok((sig_out, nonce_hex, created_at, expires_at))
+}
+
+fn hash_to_field(input: &[u8]) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let hash = Keccak256::digest(input);
+    let mut result = [0u8; 32];
+    // Right shift by 8 bits: first byte 0, copy 31 bytes from hash
+    result[1..].copy_from_slice(&hash[..31]);
+    result
+}
+
 pub fn run_http_server(
     state: Arc<RegistrationState>,
     bind_addr: &str,
@@ -414,6 +531,9 @@ pub fn run_http_server(
                         inner.registered_peers.len(),
                     ),
                 )
+            }
+            (tiny_http::Method::Get, "/v1/rp-context") => {
+                handle_rp_context(&state)
             }
             (tiny_http::Method::Post, "/v1/register") => {
                 let mut body_buf = Vec::new();
