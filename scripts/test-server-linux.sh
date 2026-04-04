@@ -14,7 +14,10 @@ KEYS_DIR="$SCRIPT_DIR/keys"
 
 [ -f "$KEYS_DIR/server.key" ] || { echo "ERROR: Run ./scripts/gen-keys.sh first"; exit 1; }
 
-SERVER_PRIVKEY_HEX=$(base64 -d "$KEYS_DIR/server.key" | xxd -p -c 64)
+SERVER_PRIVKEY_HEX=$(cat "$KEYS_DIR/server.key" | base64 -d | xxd -p -c 64)
+
+# Stop exiting on non-critical failures after initial checks
+set +e
 PUBLIC_IP="${PUBLIC_IP:-37.27.29.160}"
 
 BT_BIN="$ROOT_DIR/target/release/boringtun-cli"
