@@ -476,19 +476,6 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
 
         let mut inner = state.inner.lock().unwrap();
 
-        // Debug: log what UAPI returned vs what we have
-        tracing::info!(
-            uapi_peer_count = uapi_peers.len(),
-            registered_peer_count = inner.peer_to_octet.len(),
-            "Reaper: comparing UAPI peers with registered peers"
-        );
-        for (k, v) in &uapi_peers {
-            tracing::info!(uapi_pubkey = %k, handshake = ?v, "Reaper: UAPI peer");
-        }
-        for (k, v) in inner.peer_to_octet.iter() {
-            tracing::info!(reg_pubkey = %k, octet = %v, "Reaper: registered peer");
-        }
-
         // Identify stale peers
         let mut to_remove = Vec::new();
         for (pubkey_hex, &octet) in inner.peer_to_octet.iter() {
@@ -496,23 +483,21 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
                 Some(Some(handshake_sec)) if *handshake_sec > 0 => {
                     // Has handshaked before — check if stale
                     if now_epoch.saturating_sub(*handshake_sec) > STALE_PEER_SECS {
-                        tracing::info!(pubkey = %pubkey_hex, "Reaper: stale (handshake too old)");
                         to_remove.push((pubkey_hex.clone(), octet));
                     }
                 }
                 Some(Some(_)) | Some(None) => {
                     // Never handshaked (0 or missing). P1-A fix: check registration time.
                     if let Some(registered_at) = inner.peer_registered_at.get(pubkey_hex) {
-                        let age = now_instant.duration_since(*registered_at).as_secs();
-                        if age > STALE_NEVER_CONNECTED_SECS {
-                            tracing::info!(pubkey = %pubkey_hex, age_secs = age, "Reaper: stale (never connected)");
+                        if now_instant.duration_since(*registered_at).as_secs()
+                            > STALE_NEVER_CONNECTED_SECS
+                        {
                             to_remove.push((pubkey_hex.clone(), octet));
                         }
                     }
                 }
                 None => {
                     // Peer in our map but not in UAPI — removed externally
-                    tracing::info!(pubkey = %pubkey_hex, "Reaper: peer NOT FOUND in UAPI, removing");
                     to_remove.push((pubkey_hex.clone(), octet));
                 }
             }
