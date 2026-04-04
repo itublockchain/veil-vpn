@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const MAX_BODY_BYTES: usize = 1024;
+const MAX_BODY_BYTES: usize = 8192;
 const STALE_PEER_SECS: u64 = 600; // 10 minutes
 const STALE_NEVER_CONNECTED_SECS: u64 = 600; // 10 min for peers that never handshaked
 const REAPER_INTERVAL_SECS: u64 = 60;
