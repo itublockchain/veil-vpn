@@ -979,7 +979,8 @@ impl Device {
                             }
                             if !quota.consume(src.len() as u64) {
                                 tracing::info!("Peer quota exhausted (outbound)");
-                                if let Some(addr) = peer.endpoint().addr {
+                                let ep_addr = peer.endpoint().addr;
+                                if let Some(addr) = ep_addr {
                                     let sock_addr = socket2::SockAddr::from(addr);
                                     Self::send_payment_required(d, &mut peer, udp4, &sock_addr);
                                 }
