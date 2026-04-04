@@ -498,7 +498,8 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
             );
             match uapi_lookup {
                 Some(Some(handshake_sec)) if *handshake_sec > 0 => {
-                    let age = now_epoch.saturating_sub(*handshake_sec);
+                    // handshake_sec is a Duration (seconds since last handshake), NOT an epoch timestamp
+                    let age = *handshake_sec;
                     tracing::info!(age_secs = age, threshold = STALE_PEER_SECS, "Reaper: has handshake");
                     if age > STALE_PEER_SECS {
                         to_remove.push((pubkey_hex.clone(), octet));
