@@ -61,8 +61,18 @@ INET_IF=$(ip route show default | awk '{print $5; exit}')
 iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$INET_IF" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$INET_IF" -j MASQUERADE
 
+# Verify
 echo ""
-echo "=== Server running (Ctrl+C to stop) ==="
+echo "[Verify] Testing health endpoint..."
+HEALTH=$(curl -s --connect-timeout 3 "http://127.0.0.1:8089/health" 2>&1) || true
+[ -n "$HEALTH" ] && echo "[Verify] Health: $HEALTH" || echo "[Verify] WARNING: Health endpoint not responding"
+
+echo ""
+echo "=== Server running ==="
+echo "To register a client:"
+echo "  curl -X POST http://$PUBLIC_IP:8089/v1/register -d '{\"public_key\":\"<base64_pubkey>\"}'"
+echo ""
+echo "Press Ctrl+C to stop"
 
 cleanup() {
     echo "[Stop] Shutting down..."
