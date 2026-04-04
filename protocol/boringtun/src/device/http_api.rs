@@ -48,6 +48,8 @@ struct RegistrationInner {
     server_pubkey_cache: Option<String>,
     /// Lazily cached listen port.
     listen_port_cache: Option<u16>,
+    /// World ID nullifiers (one human = one connection).
+    used_nullifiers: HashSet<String>,
 }
 
 struct TokenBucket {
@@ -116,6 +118,7 @@ impl RegistrationState {
                 peer_registered_at: HashMap::new(),
                 server_pubkey_cache: None,
                 listen_port_cache: None,
+                used_nullifiers: HashSet::new(),
             }),
             rate_limiter: Mutex::new(HashMap::new()),
             tun_name,
@@ -346,6 +349,111 @@ fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, 
     }
 }
 
+fn handle_registration_v2(state: &RegistrationState, body: &str) -> (u16, String) {
+    let json: serde_json::Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(_) => return (400, r#"{"error":"invalid JSON"}"#.into()),
+    };
+
+    let pubkey_base64 = match json.get("public_key").and_then(|v| v.as_str()) {
+        Some(pk) => pk.to_string(),
+        None => return (400, r#"{"error":"missing public_key field"}"#.into()),
+    };
+
+    // World ID verification (if human_only mode)
+    let human_only = std::env::var("BT_HUMAN_ONLY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if human_only {
+        let world_proof = match json.get("world_proof") {
+            Some(p) => p,
+            None => return (400, r#"{"error":"world_proof required for human-only nodes"}"#.into()),
+        };
+
+        // Verify with World API
+        match verify_world_proof(state, world_proof) {
+            Ok(nullifier) => {
+                let inner = state.inner.lock().unwrap();
+                if inner.used_nullifiers.contains(&nullifier) {
+                    return (403, r#"{"error":"already verified (one human = one connection)"}"#.into());
+                }
+                drop(inner);
+                // Nullifier will be stored after successful peer creation below
+                // Store it now to prevent race conditions
+                state.inner.lock().unwrap().used_nullifiers.insert(nullifier);
+            }
+            Err(e) => {
+                tracing::warn!("World ID verification failed: {}", e);
+                return (400, format!(r#"{{"error":"World ID verification failed: {}"}}"#, e));
+            }
+        }
+    }
+
+    handle_registration(state, &pubkey_base64)
+}
+
+fn verify_world_proof(
+    state: &RegistrationState,
+    proof: &serde_json::Value,
+) -> Result<String, String> {
+    let rp_id = &state.world_rp_id;
+    if rp_id.is_empty() {
+        return Err("World ID not configured (missing BT_WORLD_RP_ID)".into());
+    }
+
+    // Forward the entire proof payload to World's verify API
+    let verify_url = format!("https://developer.world.org/api/v4/verify/{}", rp_id);
+
+    tracing::info!("Verifying World ID proof with {}", verify_url);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let resp = client
+        .post(&verify_url)
+        .header("Content-Type", "application/json")
+        .json(proof)
+        .send()
+        .map_err(|e| format!("World API request failed: {e}"))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("World API parse failed: {e}"))?;
+
+    tracing::info!("World API response [{}]: {}", status, body);
+
+    if body.get("success").and_then(|v| v.as_bool()) == Some(true) {
+        // Extract nullifier from response
+        let nullifier = body.get("nullifier")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                body.get("results")
+                    .and_then(|r| r.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|item| item.get("nullifier"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("")
+            .to_string();
+
+        if nullifier.is_empty() {
+            return Err("World API returned success but no nullifier".into());
+        }
+
+        tracing::info!("World ID verified, nullifier: {}", nullifier);
+        Ok(nullifier)
+    } else {
+        let detail = body.get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        Err(format!("World API rejected: {}", detail))
+    }
+}
+
 fn build_success_response(
     ip: Ipv4Addr,
     pc: &PaymentConfigSnapshot,
@@ -535,10 +643,7 @@ pub fn run_http_server(
                     }
                     Ok(_) => {
                         let body_str = String::from_utf8_lossy(&body_buf);
-                        match extract_pubkey(&body_str) {
-                            Some(pk) => handle_registration(&state, &pk),
-                            None => (400, r#"{"error":"missing public_key field"}"#.into()),
-                        }
+                        handle_registration_v2(&state, &body_str)
                     }
                     Err(_) => (400, r#"{"error":"failed to read body"}"#.into()),
                 }
