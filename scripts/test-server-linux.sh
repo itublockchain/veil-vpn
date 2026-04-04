@@ -17,8 +17,8 @@ KEYS_DIR="$SCRIPT_DIR/keys"
 SERVER_PRIVKEY_HEX=$(base64 -d "$KEYS_DIR/server.key" | xxd -p -c 64)
 PUBLIC_IP="${PUBLIC_IP:-37.27.29.160}"
 
-BT_BIN="$ROOT_DIR/target/release/boringtun"
-[ -f "$BT_BIN" ] || BT_BIN="$ROOT_DIR/target/debug/boringtun"
+BT_BIN="$ROOT_DIR/target/release/boringtun-cli"
+[ -f "$BT_BIN" ] || BT_BIN="$ROOT_DIR/target/debug/boringtun-cli"
 [ -f "$BT_BIN" ] || { echo "ERROR: Build first: cargo build --release -p boringtun-cli --features payment"; exit 1; }
 
 # Kill stale instances
