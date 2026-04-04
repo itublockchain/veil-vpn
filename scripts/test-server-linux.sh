@@ -48,18 +48,29 @@ sleep 3
 kill -0 $BT_PID 2>/dev/null || { echo "ERROR: boringtun exited"; exit 1; }
 
 # Configure WireGuard via UAPI
-printf "set=1\nprivate_key=%s\nlisten_port=51820\n\n" "$SERVER_PRIVKEY_HEX" | \
-    socat -t5 - UNIX-CONNECT:/var/run/wireguard/wg0.sock
+echo "[Setup] Configuring WireGuard via UAPI..."
+UAPI_RESULT=$(printf "set=1\nprivate_key=%s\nlisten_port=51820\n\n" "$SERVER_PRIVKEY_HEX" | \
+    socat -t5 - UNIX-CONNECT:/var/run/wireguard/wg0.sock 2>&1)
+echo "[Setup] UAPI response: $UAPI_RESULT"
 
-# Interface + routing
-ip addr add 10.0.0.1/24 dev wg0 2>/dev/null || true
-ip link set wg0 up
+# Interface + routing (Linux)
+echo "[Setup] Configuring interface wg0..."
+ip link set wg0 up 2>/dev/null || true
+ip addr replace 10.0.0.1/24 dev wg0 2>/dev/null || true
+ip route replace 10.0.0.0/24 dev wg0 2>/dev/null || true
+echo "[Setup] Interface wg0: $(ip -4 addr show wg0 2>/dev/null | grep inet || echo 'no address')"
 
 # IP forwarding + NAT
+echo "[Setup] Enabling IP forwarding and NAT..."
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 INET_IF=$(ip route show default | awk '{print $5; exit}')
-iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$INET_IF" -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$INET_IF" -j MASQUERADE
+if [ -n "$INET_IF" ]; then
+    iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$INET_IF" -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$INET_IF" -j MASQUERADE
+    echo "[Setup] NAT: 10.0.0.0/24 -> $INET_IF"
+else
+    echo "WARNING: Could not detect default interface for NAT"
+fi
 
 # Verify
 echo ""
