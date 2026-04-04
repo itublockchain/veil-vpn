@@ -29,9 +29,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 const API_BASE: &str = "http://37.27.29.160:8080";
 const SERVER_IP: &str = "37.27.29.160";
-const RPC_URL: &str = "https://rpc.testnet.arc.network";
-const GATEWAY_WALLET: &str = "0077777d7EBA4688BDeF3E311b846F25870A19B9";
-const USDC_CONTRACT: &str = "3600000000000000000000000000000000000000";
+const GATEWAY_API: &str = "https://gateway-api-testnet.circle.com";
+const ARC_DOMAIN: u32 = 26;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -191,8 +190,6 @@ impl VpnManager {
             .arg(&iface)
             .arg("--disable-drop-privileges")
             .arg("--foreground")
-            .arg("--verbosity")
-            .arg("debug")
             .stdout(std::process::Stdio::from(bt_log))
             .stderr(std::process::Stdio::from(bt_err))
             .spawn()
@@ -1041,24 +1038,12 @@ pub fn get_wallet_address() -> Result<String, String> {
 // ── Gateway balance query ────────────────────────────────────────────────────
 
 pub async fn query_gateway_balance(wallet_address: &str) -> Result<String, String> {
-    let addr_hex = wallet_address
-        .strip_prefix("0x")
-        .unwrap_or(wallet_address);
-
-    // balanceOf(address token, address account) selector = 0x3ccb64ae
-    // token = USDC_CONTRACT, account = wallet_address
-    let calldata = format!(
-        "0x3ccb64ae000000000000000000000000{USDC_CONTRACT}000000000000000000000000{addr_hex}"
-    );
-
     let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "eth_call",
-        "params": [{
-            "to": format!("0x{GATEWAY_WALLET}"),
-            "data": calldata,
-        }, "latest"],
-        "id": 1
+        "token": "USDC",
+        "sources": [{
+            "domain": ARC_DOMAIN,
+            "depositor": wallet_address,
+        }]
     });
 
     let client = reqwest::Client::builder()
@@ -1067,27 +1052,20 @@ pub async fn query_gateway_balance(wallet_address: &str) -> Result<String, Strin
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
     let resp: serde_json::Value = client
-        .post(RPC_URL)
+        .post(format!("{GATEWAY_API}/v1/balances"))
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("RPC request failed: {e}"))?
+        .map_err(|e| format!("Balance request failed: {e}"))?
         .json()
         .await
-        .map_err(|e| format!("RPC parse failed: {e}"))?;
+        .map_err(|e| format!("Balance parse failed: {e}"))?;
 
-    if let Some(err) = resp.get("error") {
-        return Err(format!("RPC error: {err}"));
-    }
+    let balance = resp["balances"]
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|b| b["balance"].as_str())
+        .unwrap_or("0");
 
-    let hex_str = resp["result"]
-        .as_str()
-        .ok_or("No result in RPC response")?;
-
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let raw = u128::from_str_radix(hex_str, 16).unwrap_or(0);
-    // USDC has 6 decimals
-    let whole = raw / 1_000_000;
-    let frac = raw % 1_000_000;
-    Ok(format!("{whole}.{frac:06}"))
+    Ok(balance.to_string())
 }

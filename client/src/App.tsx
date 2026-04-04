@@ -36,12 +36,17 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthEvent | null>(null);
 
-  // Load wallet info on mount (persistent key)
+  // Load wallet info on mount + auto-refresh every 3s
   useEffect(() => {
-    invoke<{ address: string; balance: string }>("get_wallet_info").then((info) => {
-      setWalletAddress(info.address);
-      setBalance(info.balance);
-    }).catch(() => {});
+    const fetch = () => {
+      invoke<{ address: string; balance: string }>("get_wallet_info").then((info) => {
+        setWalletAddress(info.address);
+        setBalance(info.balance);
+      }).catch(() => {});
+    };
+    fetch();
+    const interval = setInterval(fetch, 3_000);
+    return () => clearInterval(interval);
   }, []);
 
   // Subscribe to backend events
@@ -91,9 +96,15 @@ export default function App() {
   const handleClick = async () => {
     if (status === "connected" || status === "error") {
       try {
+        setStatus("disconnecting");
         await invoke("disconnect");
+        setStatus("disconnected");
+        setAssignedIp(null);
+        setHealth(null);
+        setError(null);
       } catch (e) {
         setError(String(e));
+        setStatus("disconnected");
       }
     } else if (status === "disconnected") {
       try {
