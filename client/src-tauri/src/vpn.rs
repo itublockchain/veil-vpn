@@ -898,6 +898,7 @@ fn boringtun_binary() -> Result<String, String> {
         "/usr/local/bin/boringtun-cli",
         "/opt/homebrew/bin/boringtun-cli",
         "../../target/release/boringtun-cli",
+        "../../../target/release/boringtun-cli",
     ];
 
     for path in &candidates {

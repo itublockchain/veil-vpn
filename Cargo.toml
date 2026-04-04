@@ -1,5 +1,5 @@
 [workspace]
-members = ["boringtun", "boringtun-cli"]
+members = ["protocol/boringtun", "protocol/boringtun-cli"]
 exclude = ["client/src-tauri"]
 
 [profile.release]
