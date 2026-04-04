@@ -131,8 +131,8 @@ impl VpnManager {
             return Err("Already connected".into());
         }
 
-        // ── 1. Generate key pair + derive wallet ───────────────────────────
-        let private = StaticSecret::random_from_rng(rand_core::OsRng);
+        // ── 1. Load or generate persistent key pair + derive wallet ────────
+        let private = load_or_create_key()?;
         let public = PublicKey::from(&private);
         let priv_b64 = B64.encode(private.as_bytes());
         let pub_b64 = B64.encode(public.as_bytes());
@@ -182,11 +182,19 @@ impl VpnManager {
         let iface = find_available_iface()?;
         let boringtun_path = boringtun_binary()?;
 
+        let bt_log = std::fs::File::create("/tmp/boringtun.log")
+            .map_err(|e| format!("Failed to create boringtun log: {e}"))?;
+        let bt_err = bt_log.try_clone()
+            .map_err(|e| format!("Failed to clone log handle: {e}"))?;
         let proc = Command::new("sudo")
             .arg(&boringtun_path)
             .arg(&iface)
             .arg("--disable-drop-privileges")
             .arg("--foreground")
+            .arg("--verbosity")
+            .arg("debug")
+            .stdout(std::process::Stdio::from(bt_log))
+            .stderr(std::process::Stdio::from(bt_err))
             .spawn()
             .map_err(|e| format!("Failed to start boringtun-cli: {e}"))?;
 
@@ -959,6 +967,34 @@ fn kill_stale_boringtun() {
     std::thread::sleep(Duration::from_millis(300));
 }
 
+fn key_path() -> std::path::PathBuf {
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".veilvpn");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("client_key")
+}
+
+fn load_or_create_key() -> Result<StaticSecret, String> {
+    let path = key_path();
+    if path.exists() {
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("Failed to read key file: {e}"))?;
+        if bytes.len() != 32 {
+            return Err("Invalid key file (expected 32 bytes)".into());
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(StaticSecret::from(arr))
+    } else {
+        let secret = StaticSecret::random_from_rng(rand_core::OsRng);
+        std::fs::write(&path, secret.as_bytes())
+            .map_err(|e| format!("Failed to write key file: {e}"))?;
+        log::info!("[vpn] created new key at {}", path.display());
+        Ok(secret)
+    }
+}
+
 fn run_sudo(args: &[&str]) -> Result<(), String> {
     log::info!("[vpn] sudo {}", args.join(" "));
     let output = Command::new("sudo")
@@ -995,6 +1031,11 @@ fn derive_evm_address(x25519_private_bytes: &[u8; 32]) -> String {
     // Skip 0x04 prefix, hash x||y (64 bytes)
     let hash = Keccak256::digest(&pubkey_bytes[1..]);
     format!("0x{}", hex::encode(&hash[12..]))
+}
+
+pub fn get_wallet_address() -> Result<String, String> {
+    let key = load_or_create_key()?;
+    Ok(derive_evm_address(key.as_bytes()))
 }
 
 // ── Gateway balance query ────────────────────────────────────────────────────

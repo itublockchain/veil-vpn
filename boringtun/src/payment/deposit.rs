@@ -40,7 +40,7 @@ pub fn auto_deposit(wallet: &PaymentWallet, config: &PaymentConfig) -> Result<St
     //    On Arc, gas is paid in USDC (native token). Reserve some for gas fees
     //    since the ERC-20 balance and native balance share the same pool.
     //    Reserve 1 USDC (1_000_000 raw units at 6 decimals) for gas.
-    const GAS_RESERVE: u128 = 1_000_000; // 1 USDC
+    const GAS_RESERVE: u128 = 100_000; // 0.1 USDC
     let deposit_amount = usdc_balance.saturating_sub(GAS_RESERVE);
     if deposit_amount == 0 {
         return Err("USDC balance too low to deposit (need >1 USDC for gas reserve)".to_string());

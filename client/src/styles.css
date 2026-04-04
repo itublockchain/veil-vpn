@@ -225,7 +225,12 @@ body {
   font-size: 10px;
   color: #2a6a2a;
   letter-spacing: 0.08em;
-  cursor: default;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.wallet-address:hover {
+  color: #3aff3a;
 }
 
 .wallet-balance {

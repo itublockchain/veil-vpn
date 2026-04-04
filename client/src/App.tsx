@@ -36,6 +36,14 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthEvent | null>(null);
 
+  // Load wallet info on mount (persistent key)
+  useEffect(() => {
+    invoke<{ address: string; balance: string }>("get_wallet_info").then((info) => {
+      setWalletAddress(info.address);
+      setBalance(info.balance);
+    }).catch(() => {});
+  }, []);
+
   // Subscribe to backend events
   useEffect(() => {
     invoke<VpnStatus>("get_status").then((s) => setStatus(s));
@@ -46,8 +54,6 @@ export default function App() {
       if (e.payload.error) setError(e.payload.error);
       if (e.payload.status === "disconnected") {
         setAssignedIp(null);
-        setWalletAddress(null);
-        setBalance(null);
         setHealth(null);
         setError(null);
       }
@@ -92,10 +98,12 @@ export default function App() {
     } else if (status === "disconnected") {
       try {
         setError(null);
+        setStatus("connecting");
         const info = await invoke<ConnectedInfo>("connect");
         setAssignedIp(info.assigned_ip);
         setWalletAddress(info.wallet_address);
         setBalance(info.gateway_balance);
+        setStatus("connected");
       } catch (e) {
         setError(String(e));
         setStatus("disconnected");
@@ -162,9 +170,15 @@ export default function App() {
       )}
 
       {/* Wallet info */}
-      {walletAddress && isConnected && (
+      {walletAddress && (
         <div className="wallet-section">
-          <div className="wallet-address" title={walletAddress}>
+          <div
+            className="wallet-address copyable"
+            title="Click to copy"
+            onClick={() => {
+              navigator.clipboard.writeText(walletAddress!);
+            }}
+          >
             {shortAddr(walletAddress)}
           </div>
           <div className="wallet-balance">

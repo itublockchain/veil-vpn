@@ -9,7 +9,7 @@ use tauri::{
     Emitter, Manager, PhysicalPosition,
 };
 
-use vpn::{ConnectedInfo, VpnManager, VpnStateEvent, VpnStatus, query_gateway_balance};
+use vpn::{ConnectedInfo, VpnManager, VpnStateEvent, VpnStatus, query_gateway_balance, get_wallet_address};
 
 struct AppState {
     vpn: Mutex<VpnManager>,
@@ -98,6 +98,19 @@ async fn refresh_balance(wallet_address: String) -> Result<String, String> {
     query_gateway_balance(&wallet_address).await
 }
 
+#[tauri::command]
+async fn get_wallet_info() -> Result<WalletInfo, String> {
+    let address = get_wallet_address()?;
+    let balance = query_gateway_balance(&address).await.unwrap_or_else(|_| "0.000000".into());
+    Ok(WalletInfo { address, balance })
+}
+
+#[derive(serde::Serialize)]
+struct WalletInfo {
+    address: String,
+    balance: String,
+}
+
 // ── App setup ─────────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -163,7 +176,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance,])
+        .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance, get_wallet_info])
         .run(tauri::generate_context!())
         .expect("error while running vpntee");
 }
