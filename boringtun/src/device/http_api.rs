@@ -126,7 +126,17 @@ fn uapi_get_peers(tun_name: &str) -> Result<(Option<String>, Option<u16>, HashMa
 
     for line in reader.lines() {
         let line = line.map_err(|e| format!("UAPI read: {}", e))?;
-        if line.is_empty() || line.starts_with("errno=") {
+
+        // Empty lines separate peer blocks — flush current peer but keep reading
+        if line.is_empty() {
+            if let Some(pk) = current_pubkey.take() {
+                peers.insert(pk, current_handshake.take());
+            }
+            continue;
+        }
+
+        // errno= terminates the UAPI response
+        if line.starts_with("errno=") {
             if let Some(pk) = current_pubkey.take() {
                 peers.insert(pk, current_handshake.take());
             }

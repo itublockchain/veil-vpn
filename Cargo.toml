@@ -1,5 +1,6 @@
 [workspace]
 members = ["boringtun", "boringtun-cli"]
+exclude = ["client/src-tauri"]
 
 [profile.release]
 lto = true        # Enable full link-time optimization.

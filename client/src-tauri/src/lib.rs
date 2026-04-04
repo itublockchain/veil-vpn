@@ -1,5 +1,3 @@
-mod ens;
-mod proxy;
 mod vpn;
 
 use std::sync::{Arc, Mutex as StdMutex};
@@ -8,73 +6,101 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, PhysicalPosition,
+    Emitter, Manager, PhysicalPosition,
 };
 
-use ens::Server;
-use vpn::{ConnectedInfo, VpnManager};
+use vpn::{ConnectedInfo, VpnManager, VpnStateEvent, VpnStatus, query_gateway_balance};
 
 struct AppState {
     vpn: Mutex<VpnManager>,
-    servers: Mutex<Vec<Server>>,
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn fetch_servers(state: tauri::State<'_, AppState>) -> Result<Vec<Server>, String> {
-    let servers = ens::fetch_servers_from_ens().await?;
-    *state.servers.lock().await = servers.clone();
-    Ok(servers)
-}
-
-#[tauri::command]
-async fn connect_vpn(
-    server_id: String,
+async fn connect(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectedInfo, String> {
-    let server = {
-        let servers = state.servers.lock().await;
-        servers
-            .iter()
-            .find(|s| s.id == server_id)
-            .cloned()
-            .ok_or_else(|| format!("Server '{server_id}' not found"))?
-    };
+    // Emit connecting state
+    let _ = app.emit(
+        "vpn-state",
+        &VpnStateEvent {
+            status: VpnStatus::Connecting,
+            assigned_ip: None,
+            error: None,
+        },
+    );
 
-    let info = state
-        .vpn
-        .lock()
-        .await
-        .connect(
-            server.name.clone(),
-            server.api_url.clone(),
-            server.ws_url.clone(),
-        )
-        .await?;
+    let result = state.vpn.lock().await.connect(app.clone()).await;
 
-    Ok(info)
+    match &result {
+        Ok(info) => {
+            let _ = app.emit(
+                "vpn-state",
+                &VpnStateEvent {
+                    status: VpnStatus::Connected,
+                    assigned_ip: Some(info.assigned_ip.clone()),
+                    error: None,
+                },
+            );
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "vpn-state",
+                &VpnStateEvent {
+                    status: VpnStatus::Error,
+                    assigned_ip: None,
+                    error: Some(e.clone()),
+                },
+            );
+        }
+    }
+
+    result
 }
 
 #[tauri::command]
-async fn disconnect_vpn(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.vpn.lock().await.disconnect()
+async fn disconnect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let _ = app.emit(
+        "vpn-state",
+        &VpnStateEvent {
+            status: VpnStatus::Disconnecting,
+            assigned_ip: None,
+            error: None,
+        },
+    );
+
+    let result = state.vpn.lock().await.disconnect();
+
+    let _ = app.emit(
+        "vpn-state",
+        &VpnStateEvent {
+            status: VpnStatus::Disconnected,
+            assigned_ip: None,
+            error: result.as_ref().err().cloned(),
+        },
+    );
+
+    result
 }
 
 #[tauri::command]
-async fn connect_no_tunnel(state: tauri::State<'_, AppState>) -> Result<ConnectedInfo, String> {
-    state.vpn.lock().await.connect_no_tunnel().await
+async fn get_status(state: tauri::State<'_, AppState>) -> Result<VpnStatus, String> {
+    Ok(state.vpn.lock().await.status())
 }
 
 #[tauri::command]
-async fn get_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    Ok(state.vpn.lock().await.is_connected())
+async fn refresh_balance(wallet_address: String) -> Result<String, String> {
+    query_gateway_balance(&wallet_address).await
 }
 
 // ── App setup ─────────────────────────────────────────────────────────────────
 
 pub fn run() {
-    // Shared state for double-click detection and debounce
     let last_click: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None));
     let pending_handle: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>> =
         Arc::new(StdMutex::new(None));
@@ -83,7 +109,6 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             vpn: Mutex::new(VpnManager::new()),
-            servers: Mutex::new(vec![]),
         })
         .setup(move |app| {
             let last_click = last_click.clone();
@@ -112,13 +137,11 @@ pub fn run() {
                         };
 
                         if is_double {
-                            // Cancel any pending single-click toggle and quit
                             if let Some(handle) = pending_handle.lock().unwrap().take() {
                                 handle.abort();
                             }
                             tray.app_handle().exit(0);
                         } else {
-                            // Debounce: wait briefly to see if a second click arrives
                             let app = tray.app_handle().clone();
                             let click_pos = position;
                             let handle = tokio::spawn(async move {
@@ -135,19 +158,12 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Hide from Dock on macOS — tray-only app
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            fetch_servers,
-            connect_vpn,
-            connect_no_tunnel,
-            disconnect_vpn,
-            get_status,
-        ])
+        .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance,])
         .run(tauri::generate_context!())
         .expect("error while running vpntee");
 }
@@ -160,8 +176,6 @@ fn toggle_window(app: &tauri::AppHandle, tray_pos: PhysicalPosition<f64>) {
             let _ = app.hide();
         } else {
             position_below_tray(&win, tray_pos);
-            // On macOS with Accessory policy, we must activate the app
-            // before showing the window so it actually receives focus.
             #[cfg(target_os = "macos")]
             let _ = app.show();
             let _ = win.show();
@@ -170,7 +184,6 @@ fn toggle_window(app: &tauri::AppHandle, tray_pos: PhysicalPosition<f64>) {
     }
 }
 
-/// Positions the popup directly below the tray icon that was clicked.
 fn position_below_tray(win: &tauri::WebviewWindow, tray_pos: PhysicalPosition<f64>) {
     let scale = win
         .current_monitor()
@@ -186,7 +199,6 @@ fn position_below_tray(win: &tauri::WebviewWindow, tray_pos: PhysicalPosition<f6
 
     let margin = (8.0 * scale) as i32;
 
-    // Center the window horizontally on the tray icon, place it just below
     let x = (tray_pos.x as i32) - (win_size.width as i32 / 2);
     let y = (tray_pos.y as i32) + margin;
 

@@ -1,103 +1,135 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
-interface Server {
-  id: string;
-  name: string;
-  location: string;
-  api_url: string;
-  ws_url: string;
-}
+type VpnStatus =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "disconnecting"
+  | "error";
 
 interface ConnectedInfo {
   assigned_ip: string;
-  server_name: string;
+  server_endpoint: string;
+  wallet_address: string;
+  gateway_balance: string;
 }
 
-type ConnStatus = "idle" | "connecting" | "connected" | "disconnecting";
+interface VpnStateEvent {
+  status: VpnStatus;
+  assigned_ip: string | null;
+  error: string | null;
+}
+
+interface HealthEvent {
+  connected: boolean;
+  process_alive: boolean;
+  handshake_age_secs: number | null;
+}
 
 export default function App() {
-  const [showServers, setShowServers] = useState(false);
-  const [connStatus, setConnStatus] = useState<ConnStatus>("idle");
-  const [selectedServer, setSelectedServer] = useState<Server | null>(null);
-  const [servers, setServers] = useState<Server[]>([]);
-  const [connectedInfo, setConnectedInfo] = useState<ConnectedInfo | null>(null);
+  const [status, setStatus] = useState<VpnStatus>("disconnected");
+  const [assignedIp, setAssignedIp] = useState<string | null>(null);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [balance, setBalance] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loadingServers, setLoadingServers] = useState(false);
+  const [health, setHealth] = useState<HealthEvent | null>(null);
 
-  const toggleServerList = async () => {
-    const opening = !showServers;
-    setShowServers(opening);
-    if (opening && servers.length === 0) {
-      setLoadingServers(true);
-      try {
-        const list = await invoke<Server[]>("fetch_servers");
-        setServers(list);
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setLoadingServers(false);
+  // Subscribe to backend events
+  useEffect(() => {
+    invoke<VpnStatus>("get_status").then((s) => setStatus(s));
+
+    const unlistenState = listen<VpnStateEvent>("vpn-state", (e) => {
+      setStatus(e.payload.status);
+      if (e.payload.assigned_ip) setAssignedIp(e.payload.assigned_ip);
+      if (e.payload.error) setError(e.payload.error);
+      if (e.payload.status === "disconnected") {
+        setAssignedIp(null);
+        setWalletAddress(null);
+        setBalance(null);
+        setHealth(null);
+        setError(null);
       }
-    }
-  };
-
-  const selectServer = (server: Server) => {
-    setSelectedServer(server);
-    setShowServers(false);
-    setError(null);
-  };
-
-  const handleConnect = async () => {
-    if (connStatus === "connected") {
-      setConnStatus("disconnecting");
-      try {
-        await invoke("disconnect_vpn");
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setConnStatus("idle");
-        setConnectedInfo(null);
+      if (e.payload.status === "connecting") {
+        setError(null);
       }
-      return;
-    }
+    });
 
-    if (!selectedServer) return;
-    setConnStatus("connecting");
-    setError(null);
+    const unlistenHealth = listen<HealthEvent>("vpn-health", (e) => {
+      setHealth(e.payload);
+      if (!e.payload.process_alive) {
+        setStatus("error");
+        setError("VPN process died unexpectedly");
+      }
+    });
+
+    return () => {
+      unlistenState.then((f) => f());
+      unlistenHealth.then((f) => f());
+    };
+  }, []);
+
+  const refreshBalance = useCallback(async () => {
+    if (!walletAddress) return;
     try {
-      const info = await invoke<ConnectedInfo>("connect_vpn", {
-        serverId: selectedServer.id,
+      const bal = await invoke<string>("refresh_balance", {
+        walletAddress,
       });
-      setConnectedInfo(info);
-      setConnStatus("connected");
-    } catch (e) {
-      setError(String(e));
-      setConnStatus("idle");
+      setBalance(bal);
+    } catch {
+      // silent
+    }
+  }, [walletAddress]);
+
+  const handleClick = async () => {
+    if (status === "connected" || status === "error") {
+      try {
+        await invoke("disconnect");
+      } catch (e) {
+        setError(String(e));
+      }
+    } else if (status === "disconnected") {
+      try {
+        setError(null);
+        const info = await invoke<ConnectedInfo>("connect");
+        setAssignedIp(info.assigned_ip);
+        setWalletAddress(info.wallet_address);
+        setBalance(info.gateway_balance);
+      } catch (e) {
+        setError(String(e));
+        setStatus("disconnected");
+      }
     }
   };
 
-  const handleNoTunnel = async () => {
-    setConnStatus("connecting");
-    setError(null);
-    try {
-      const info = await invoke<ConnectedInfo>("connect_no_tunnel");
-      setConnectedInfo(info);
-      setConnStatus("connected");
-    } catch (e) {
-      setError(String(e));
-      setConnStatus("idle");
-    }
-  };
-
-  const isConnected = connStatus === "connected";
-  const isLoading = connStatus === "connecting" || connStatus === "disconnecting";
+  const isLoading = status === "connecting" || status === "disconnecting";
+  const isConnected = status === "connected";
+  const isError = status === "error";
+  const showDisconnect = isConnected || isError;
 
   const buttonLabel = () => {
-    if (connStatus === "connecting") return "Connecting...";
-    if (connStatus === "disconnecting") return "Disconnecting...";
-    if (connStatus === "connected") return "Disconnect";
-    return "Connect";
+    switch (status) {
+      case "connecting":
+        return "Connecting...";
+      case "disconnecting":
+        return "Disconnecting...";
+      case "connected":
+      case "error":
+        return "Disconnect";
+      default:
+        return "Connect";
+    }
   };
+
+  const formatHandshake = (secs: number | null) => {
+    if (secs === null) return "no handshake";
+    if (secs < 60) return `${secs}s ago`;
+    return `${Math.floor(secs / 60)}m ago`;
+  };
+
+  const shortAddr = (addr: string) =>
+    `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 
   return (
     <div className="app">
@@ -106,75 +138,66 @@ export default function App() {
       <span className="corner corner-bl" />
       <span className="corner corner-br" />
 
-      {/* Server selector */}
-      <div className="server-selector-wrapper">
-        <button
-          className={`server-selector ${showServers ? "open" : ""}`}
-          onClick={toggleServerList}
-          disabled={isConnected || isLoading}
-        >
-          <span className="server-selector-name">
-            {selectedServer ? selectedServer.name : "Select Server"}
-          </span>
-          <span className="server-selector-arrow">{showServers ? "\u25B2" : "\u25BC"}</span>
-        </button>
-
-        {/* Server dropdown */}
-        {showServers && (
-          <div className="server-dropdown">
-            {loadingServers ? (
-              <div className="loading-row">
-                <span className="spinner" />
-                <span>scanning...</span>
-              </div>
-            ) : (
-              servers.map((s) => (
-                <div
-                  key={s.id}
-                  className={`server-item ${selectedServer?.id === s.id ? "selected" : ""}`}
-                  onClick={() => selectServer(s)}
-                >
-                  <span className="server-item-name">{s.name}</span>
-                  <span className="server-item-loc">{s.location}</span>
-                </div>
-              ))
-            )}
-          </div>
-        )}
+      {/* Status */}
+      <div className="status-section">
+        <div
+          className={`status-indicator ${isConnected ? "on" : ""} ${isError ? "err" : ""}`}
+        />
+        <span className="status-label">
+          {isConnected
+            ? "CONNECTED"
+            : isError
+              ? "ERROR"
+              : isLoading
+                ? "..."
+                : "DISCONNECTED"}
+        </span>
       </div>
+
+      {/* Assigned IP */}
+      {assignedIp && isConnected && (
+        <div className="connected-info">
+          <span className="connected-ip">{assignedIp}</span>
+        </div>
+      )}
+
+      {/* Wallet info */}
+      {walletAddress && isConnected && (
+        <div className="wallet-section">
+          <div className="wallet-address" title={walletAddress}>
+            {shortAddr(walletAddress)}
+          </div>
+          <div className="wallet-balance">
+            <span className="balance-value">{balance ?? "..."} USDC</span>
+            <button className="btn-refresh" onClick={refreshBalance} title="Refresh balance">
+              ↻
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Error */}
       {error && <div className="error-msg">! {error}</div>}
 
-      {/* Connected info */}
-      {isConnected && connectedInfo && (
-        <div className="connected-info">
-          <span className="connected-ip">{connectedInfo.assigned_ip}</span>
-        </div>
-      )}
-
-      {/* Connect button */}
+      {/* Connect / Disconnect button */}
       <button
-        className={`btn-connect ${isConnected ? "connected" : ""} ${isLoading ? "loading" : ""}`}
-        onClick={handleConnect}
-        disabled={(!selectedServer && !isConnected) || isLoading}
+        className={`btn-connect ${showDisconnect ? "connected" : ""} ${isLoading ? "loading" : ""}`}
+        onClick={handleClick}
+        disabled={isLoading}
       >
         {isLoading && <span className="spinner" />}
         <span>{buttonLabel()}</span>
-        {isConnected && <span className="status-dot" />}
       </button>
 
-      {/* No Tunnel button */}
-      {!isConnected && (
-        <button
-          className={`btn-no-tunnel ${isLoading ? "loading" : ""}`}
-          onClick={handleNoTunnel}
-          disabled={isLoading}
-        >
-          {isLoading && <span className="spinner" />}
-          <span>Connect (No Tunnel)</span>
-        </button>
+      {/* Health info */}
+      {health && isConnected && (
+        <div className="health-info">
+          <span className={`health-dot ${health.connected ? "ok" : "stale"}`} />
+          <span>handshake: {formatHandshake(health.handshake_age_secs)}</span>
+        </div>
       )}
+
+      <div className="server-label">37.27.29.160</div>
     </div>
   );
 }
