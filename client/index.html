@@ -7,6 +7,22 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Fix Tauri WASM loading - intercept fetch for .wasm files
+      const _fetch = window.fetch;
+      window.fetch = async (...args) => {
+        const resp = await _fetch(...args);
+        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+        if (url.endsWith('.wasm')) {
+          const bytes = await resp.arrayBuffer();
+          return new Response(bytes, {
+            status: 200,
+            headers: { 'Content-Type': 'application/wasm' }
+          });
+        }
+        return resp;
+      };
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

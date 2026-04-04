@@ -455,6 +455,89 @@ body {
   letter-spacing: 0.08em;
 }
 
+/* ── Human badge ── */
+.human-badge {
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #4ade80;
+  border: 1px solid #4ade8044;
+  border-radius: 2px;
+  padding: 2px 5px;
+  background: #4ade8010;
+}
+
+.human-badge.small {
+  font-size: 6px;
+  padding: 1px 4px;
+}
+
+/* ── World ID Modal ── */
+.worldid-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.worldid-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.worldid-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.worldid-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.worldid-close:hover {
+  color: var(--text);
+}
+
+.worldid-qr {
+  padding: 16px;
+  background: var(--surface);
+  border-radius: 8px;
+}
+
+.worldid-status {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.node-row-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* ── Animations ── */
 @keyframes pulse {
   0%, 100% { opacity: 1; }

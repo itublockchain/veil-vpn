@@ -1,5 +1,6 @@
 mod vpn;
 
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -10,6 +11,7 @@ use vpn::{ConnectedInfo, VpnManager, VpnStateEvent, VpnStatus, query_gateway_bal
 
 struct AppState {
     vpn: Mutex<VpnManager>,
+    world_id_session: Mutex<Option<Arc<idkit::BridgeConnection>>>,
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
@@ -18,6 +20,7 @@ struct AppState {
 async fn connect(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    world_proof: Option<serde_json::Value>,
 ) -> Result<ConnectedInfo, String> {
     // Emit connecting state
     let _ = app.emit(
@@ -29,7 +32,7 @@ async fn connect(
         },
     );
 
-    let result = state.vpn.lock().await.connect(app.clone()).await;
+    let result = state.vpn.lock().await.connect(app.clone(), world_proof).await;
 
     match &result {
         Ok(info) => {
@@ -96,6 +99,102 @@ async fn refresh_balance(wallet_address: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_pubkey() -> Result<String, String> {
+    vpn::get_pubkey_b64()
+}
+
+#[tauri::command]
+async fn start_world_id(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    use idkit::bridge::{BridgeConnectionParams, RequestKind, Environment};
+    use idkit::{AppId, RpContext, VerificationLevel, Preset};
+
+    // 1. Fetch RP context from VPN server
+    let api_base = vpn::api_base();
+    let resp: serde_json::Value = reqwest::get(format!("{}/v1/rp-context", api_base))
+        .await
+        .map_err(|e| format!("Failed to reach server: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {e}"))?;
+
+    if let Some(err) = resp.get("error") {
+        return Err(err.as_str().unwrap_or("unknown").to_string());
+    }
+
+    let rp_context = RpContext::new(
+        resp["rp_id"].as_str().unwrap_or(""),
+        resp["nonce"].as_str().unwrap_or(""),
+        resp["created_at"].as_u64().unwrap_or(0),
+        resp["expires_at"].as_u64().unwrap_or(0),
+        resp["signature"].as_str().unwrap_or(""),
+    ).map_err(|e| format!("Invalid RP context: {e}"))?;
+
+    let action = resp["action"].as_str().unwrap_or("veil-vpn-connect").to_string();
+
+    // 2. Get signal (WireGuard pubkey)
+    let signal = vpn::get_pubkey_b64().unwrap_or_default();
+
+    // 3. Build params using OrbLegacy preset
+    let preset = Preset::OrbLegacy { signal: Some(signal) };
+    let (constraints, verification_level, legacy_signal) = preset.to_bridge_params();
+
+    let params = BridgeConnectionParams {
+        app_id: AppId::new("app_59ecb9a350d70a30543cb847da635d31").map_err(|e| format!("{e}"))?,
+        kind: RequestKind::Uniqueness { action },
+        constraints: Some(constraints),
+        rp_context,
+        action_description: None,
+        legacy_verification_level: verification_level,
+        legacy_signal: legacy_signal.unwrap_or_default(),
+        bridge_url: None,
+        allow_legacy_proofs: true,
+        override_connect_base_url: None,
+        return_to: None,
+        environment: Some(Environment::Staging),
+    };
+
+    // 4. Create bridge session
+    let session = idkit::BridgeConnection::create(params)
+        .await
+        .map_err(|e| format!("Failed to create World ID session: {e}"))?;
+
+    let url = session.connect_url();
+
+    // Store session for polling
+    *state.world_id_session.lock().await = Some(Arc::new(session));
+
+    Ok(url)
+}
+
+#[tauri::command]
+async fn poll_world_id(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let session = state.world_id_session.lock().await;
+    let session = session.as_ref().ok_or("No active World ID session")?;
+
+    match session.poll_for_status().await.map_err(|e| format!("{e}"))? {
+        idkit::Status::WaitingForConnection => {
+            Ok(serde_json::json!({ "status": "waiting" }))
+        }
+        idkit::Status::AwaitingConfirmation => {
+            Ok(serde_json::json!({ "status": "confirming" }))
+        }
+        idkit::Status::Confirmed(result) => {
+            Ok(serde_json::json!({
+                "status": "confirmed",
+                "result": result,
+            }))
+        }
+        idkit::Status::Failed(err) => {
+            Err(format!("World ID verification failed: {err}"))
+        }
+    }
+}
+
+#[tauri::command]
 async fn get_wallet_info() -> Result<WalletInfo, String> {
     let address = get_wallet_address()?;
     let balance = query_gateway_balance(&address).await.unwrap_or_else(|_| "0.000000".into());
@@ -112,9 +211,11 @@ struct WalletInfo {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_localhost::Builder::new(1421).build())
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             vpn: Mutex::new(VpnManager::new()),
+            world_id_session: Mutex::new(None),
         })
         .setup(move |app| {
             let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))
@@ -148,7 +249,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance, get_wallet_info])
+        .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance, get_wallet_info, get_pubkey, start_world_id, poll_world_id])
         .run(tauri::generate_context!())
         .expect("error while running vpntee");
 }

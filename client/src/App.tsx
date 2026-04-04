@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { QRCodeSVG } from "qrcode.react";
 import logo from "./logo.svg";
+
 
 type VpnStatus =
   | "disconnected"
@@ -33,12 +35,13 @@ interface Server {
   ens: string;
   region: string;
   ip: string;
+  humanOnly: boolean;
 }
 
 const SERVERS: Server[] = [
-  { ens: "ethglobal.veilvpn.eth", region: "EU", ip: "37.27.29.160" },
-  { ens: "silk.veilvpn.eth", region: "US", ip: "37.27.29.160" },
-  { ens: "ghost.veilvpn.eth", region: "APAC", ip: "37.27.29.160" },
+  { ens: "ethglobal.veilvpn.eth", region: "EU", ip: "204.168.211.96", humanOnly: true },
+  { ens: "silk.veilvpn.eth", region: "US", ip: "204.168.211.96", humanOnly: false },
+  { ens: "ghost.veilvpn.eth", region: "APAC", ip: "204.168.211.96", humanOnly: false },
 ];
 
 export default function App() {
@@ -52,18 +55,30 @@ export default function App() {
   const [ensInput, setEnsInput] = useState("");
   const [copied, setCopied] = useState(false);
   const [nodesOpen, setNodesOpen] = useState(false);
+  const [worldIdOpen, setWorldIdOpen] = useState(false);
+  const [worldProof, setWorldProof] = useState<any>(null);
+  const [worldIdUrl, setWorldIdUrl] = useState<string | null>(null);
+  const [worldIdStatus, setWorldIdStatus] = useState<string>("");
+  const pollingRef = useRef<number | null>(null);
 
   // Load wallet info on mount + auto-refresh every 3s
   useEffect(() => {
-    const fetch = () => {
+    const fetchInfo = () => {
       invoke<{ address: string; balance: string }>("get_wallet_info").then((info) => {
         setWalletAddress(info.address);
         setBalance(info.balance);
       }).catch(() => {});
     };
-    fetch();
-    const interval = setInterval(fetch, 3_000);
+    fetchInfo();
+    const interval = setInterval(fetchInfo, 3_000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+    };
   }, []);
 
   // Subscribe to backend events
@@ -101,14 +116,50 @@ export default function App() {
   const refreshBalance = useCallback(async () => {
     if (!walletAddress) return;
     try {
-      const bal = await invoke<string>("refresh_balance", {
-        walletAddress,
-      });
+      const bal = await invoke<string>("refresh_balance", { walletAddress });
       setBalance(bal);
     } catch {
       // silent
     }
   }, [walletAddress]);
+
+  const startWorldIdPoll = () => {
+    pollingRef.current = window.setInterval(async () => {
+      try {
+        const resp = await invoke<{ status: string; result?: any }>("poll_world_id");
+        setWorldIdStatus(resp.status);
+        if (resp.status === "confirmed") {
+          if (pollingRef.current) clearInterval(pollingRef.current);
+          setWorldProof(resp.result);
+          setWorldIdOpen(false);
+          setWorldIdUrl(null);
+          doConnect(resp.result);
+        }
+      } catch (e) {
+        if (pollingRef.current) clearInterval(pollingRef.current);
+        setError(String(e));
+        setWorldIdOpen(false);
+        setWorldIdUrl(null);
+      }
+    }, 1500);
+  };
+
+  const doConnect = async (proof: any) => {
+    try {
+      setError(null);
+      setStatus("connecting");
+      const info = await invoke<ConnectedInfo>("connect", {
+        worldProof: proof || null,
+      });
+      setAssignedIp(info.assigned_ip);
+      setWalletAddress(info.wallet_address);
+      setBalance(info.gateway_balance);
+      setStatus("connected");
+    } catch (e) {
+      setError(String(e));
+      setStatus("disconnected");
+    }
+  };
 
   const handleClick = async () => {
     if (status === "connected" || status === "error") {
@@ -119,25 +170,29 @@ export default function App() {
         setAssignedIp(null);
         setHealth(null);
         setError(null);
+        setWorldProof(null);
       } catch (e) {
         setError(String(e));
         setStatus("disconnected");
       }
     } else if (status === "disconnected") {
-      try {
-        setError(null);
-        setStatus("connecting");
-        const info = await invoke<ConnectedInfo>("connect");
-        setAssignedIp(info.assigned_ip);
-        setWalletAddress(info.wallet_address);
-        setBalance(info.gateway_balance);
-        setStatus("connected");
-      } catch (e) {
-        setError(String(e));
-        setStatus("disconnected");
+      if (selectedServer.humanOnly && !worldProof) {
+        try {
+          setError(null);
+          setWorldIdStatus("starting");
+          const url = await invoke<string>("start_world_id");
+          setWorldIdUrl(url);
+          setWorldIdOpen(true);
+          startWorldIdPoll();
+        } catch (e) {
+          setError(`World ID: ${e}`);
+        }
+        return;
       }
+      doConnect(worldProof);
     }
   };
+
 
   const isLoading = status === "connecting" || status === "disconnecting";
   const isConnected = status === "connected";
@@ -209,6 +264,7 @@ export default function App() {
             <span className="node-selected-ens">{selectedServer.ens}</span>
           </div>
           <div className="node-selected-right">
+            {selectedServer.humanOnly && <span className="human-badge">HUMAN</span>}
             <span className="node-selected-region">{selectedServer.region}</span>
             <span className={`node-chevron ${nodesOpen ? "open" : ""}`}>&#9662;</span>
           </div>
@@ -223,10 +279,14 @@ export default function App() {
                 onClick={() => {
                   setSelectedServer(s);
                   setNodesOpen(false);
+                  setWorldProof(null);
                 }}
               >
                 <span className="node-row-ens">{s.ens}</span>
-                <span className="node-row-region">{s.region}</span>
+                <div className="node-row-right">
+                  {s.humanOnly && <span className="human-badge small">HUMAN</span>}
+                  <span className="node-row-region">{s.region}</span>
+                </div>
               </div>
             ))}
             <div className="node-custom" onClick={(e) => e.stopPropagation()}>
@@ -262,10 +322,36 @@ export default function App() {
           </>
         ) : isConnected || isError ? (
           <span>DISCONNECT</span>
+        ) : selectedServer.humanOnly ? (
+          <span>VERIFY & CONNECT</span>
         ) : (
           <span>CONNECT</span>
         )}
       </button>
+
+      {/* World ID QR Code */}
+      {worldIdOpen && worldIdUrl && (
+        <div className="worldid-overlay">
+          <div className="worldid-modal">
+            <div className="worldid-header">
+              <span>VERIFY HUMAN</span>
+              <button className="worldid-close" onClick={() => {
+                setWorldIdOpen(false);
+                setWorldIdUrl(null);
+                if (pollingRef.current) clearInterval(pollingRef.current);
+              }}>X</button>
+            </div>
+            <div className="worldid-qr">
+              <QRCodeSVG value={worldIdUrl} size={180} bgColor="transparent" fgColor="#ff6b00" />
+            </div>
+            <div className="worldid-status">
+              {worldIdStatus === "waiting" ? "Scan with World App" :
+               worldIdStatus === "confirming" ? "Confirm in World App..." :
+               "Initializing..."}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <div className="footer">

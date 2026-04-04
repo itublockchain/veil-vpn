@@ -25,11 +25,17 @@ use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-// ── Server config ────────────────────────────────────────────────────────────
+// ── Server config (env overridable) ──────────────────────────────────────────
 
-const API_BASE: &str = "http://37.27.29.160:8080";
-const SERVER_IP: &str = "37.27.29.160";
-const GATEWAY_API: &str = "https://gateway-api-testnet.circle.com";
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+lazy_static::lazy_static! {
+    static ref API_BASE: String = env_or("VEIL_API_BASE", "http://204.168.211.96:8080");
+    static ref SERVER_IP: String = env_or("VEIL_SERVER_IP", "204.168.211.96");
+    static ref GATEWAY_API: String = env_or("VEIL_GATEWAY_API", "https://gateway-api-testnet.circle.com");
+}
 const ARC_DOMAIN: u32 = 26;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -125,6 +131,7 @@ impl VpnManager {
     pub async fn connect(
         &mut self,
         app_handle: tauri::AppHandle,
+        world_proof: Option<serde_json::Value>,
     ) -> Result<ConnectedInfo, String> {
         if self.ctx.is_some() {
             return Err("Already connected".into());
@@ -145,10 +152,13 @@ impl VpnManager {
             .build()
             .map_err(|e| format!("HTTP client error: {e}"))?;
 
-        let body = serde_json::json!({ "public_key": pub_b64 });
+        let mut body = serde_json::json!({ "public_key": pub_b64 });
+        if let Some(proof) = world_proof {
+            body["world_proof"] = proof;
+        }
 
         let resp = client
-            .post(format!("{API_BASE}/v1/register"))
+            .post(format!("{}/v1/register", *API_BASE))
             .json(&body)
             .send()
             .await
@@ -167,7 +177,7 @@ impl VpnManager {
 
         let server_pub = reg.server_public_key;
         let assigned_ip = reg.assigned_ip.clone(); // e.g. "10.0.0.185/32"
-        let endpoint = reg.endpoint; // e.g. "37.27.29.160:51820"
+        let endpoint = reg.endpoint; // e.g. "204.168.211.96:51820"
         let ip_bare = assigned_ip
             .split('/')
             .next()
@@ -253,7 +263,7 @@ impl VpnManager {
         log::info!("[vpn] original gateway={original_gw} iface={original_phys_iface}");
 
         // ── 8. Configure full-tunnel routing ───────────────────────────────
-        if let Err(e) = configure_full_tunnel(&iface, SERVER_IP, &original_gw) {
+        if let Err(e) = configure_full_tunnel(&iface, &SERVER_IP, &original_gw) {
             cleanup.run();
             return Err(e);
         }
@@ -261,7 +271,7 @@ impl VpnManager {
         let iface_clone3 = iface.clone();
         let gw_clone = original_gw.clone();
         cleanup.push("teardown routes", move || {
-            teardown_routes(&iface_clone3, SERVER_IP, &gw_clone);
+            teardown_routes(&iface_clone3, &SERVER_IP, &gw_clone);
         });
 
         // ── 9. Set DNS ─────────────────────────────────────────────────────
@@ -286,7 +296,7 @@ impl VpnManager {
             original_gateway: original_gw,
             original_phys_iface,
             original_dns,
-            server_ip: SERVER_IP.to_string(),
+            server_ip: SERVER_IP.clone(),
             health_cancel,
         });
 
@@ -1031,9 +1041,19 @@ fn derive_evm_address(x25519_private_bytes: &[u8; 32]) -> String {
     format!("0x{}", hex::encode(&hash[12..]))
 }
 
+pub fn api_base() -> String {
+    API_BASE.clone()
+}
+
 pub fn get_wallet_address() -> Result<String, String> {
     let key = load_or_create_key()?;
     Ok(derive_evm_address(key.as_bytes()))
+}
+
+pub fn get_pubkey_b64() -> Result<String, String> {
+    let private = load_or_create_key()?;
+    let public = x25519_dalek::PublicKey::from(&private);
+    Ok(B64.encode(public.as_bytes()))
 }
 
 // ── Gateway balance query ────────────────────────────────────────────────────
@@ -1053,7 +1073,7 @@ pub async fn query_gateway_balance(wallet_address: &str) -> Result<String, Strin
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
     let resp: serde_json::Value = client
-        .post(format!("{GATEWAY_API}/v1/balances"))
+        .post(format!("{}/v1/balances", *GATEWAY_API))
         .json(&body)
         .send()
         .await

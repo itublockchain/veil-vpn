@@ -31,3 +31,6 @@ sha3 = "0.10"
 hkdf = "0.12"
 hex = "0.4"
 dirs = "5"
+lazy_static = "1"
+tauri-plugin-localhost = "2.3.2"
+idkit-core = { path = "../../../worldcoin-idkit/rust/core", features = ["bridge", "native-crypto"] }
