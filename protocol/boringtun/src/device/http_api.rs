@@ -404,7 +404,7 @@ fn handle_rp_context(state: &RegistrationState) -> (u16, String) {
 
 fn generate_rp_signature(
     signing_key_bytes: &[u8; 32],
-    action: &str,
+    _action: &str,
 ) -> Result<(String, String, u64, u64), String> {
     use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
     use sha3::{Digest, Keccak256};
@@ -425,24 +425,15 @@ fn generate_rp_signature(
     let created_at = now;
     let expires_at = now + 300; // 5 min TTL
 
-    // Hash the action
-    let action_hash = hash_to_field(action.as_bytes());
+    // Build message: nonce(32) || created_at(8 BE) || expires_at(8 BE) = 48 bytes
+    // Matches JS SDK: computeRpSignatureMessage(nonceBytes, createdAt, expiresAt)
+    let mut msg = [0u8; 48];
+    msg[..32].copy_from_slice(&nonce);
+    msg[32..40].copy_from_slice(&created_at.to_be_bytes());
+    msg[40..48].copy_from_slice(&expires_at.to_be_bytes());
 
-    // Build message: version(1) || nonce(32) || created_at(8 BE) || expires_at(8 BE) || action_hash(32) = 81 bytes
-    let mut msg = Vec::with_capacity(81);
-    msg.push(0x01); // version
-    msg.extend_from_slice(&nonce);
-    msg.extend_from_slice(&created_at.to_be_bytes());
-    msg.extend_from_slice(&expires_at.to_be_bytes());
-    msg.extend_from_slice(&action_hash);
-
-    // EIP-191 prefix
-    let prefix = format!("\x19Ethereum Signed Message:\n{}", msg.len());
-    let mut prefixed = Vec::new();
-    prefixed.extend_from_slice(prefix.as_bytes());
-    prefixed.extend_from_slice(&msg);
-
-    let digest = Keccak256::digest(&prefixed);
+    // Direct keccak256 of message (NO EIP-191 prefix - matches JS SDK)
+    let digest = Keccak256::digest(&msg);
     let digest_arr: [u8; 32] = digest.into();
 
     // Sign with recoverable ECDSA
@@ -451,14 +442,14 @@ fn generate_rp_signature(
         .map_err(|e| format!("Signing failed: {e}"))?;
 
     let sig_bytes = signature.to_bytes();
-    let mut sig_hex = Vec::with_capacity(65);
-    sig_hex.extend_from_slice(&sig_bytes); // r(32) || s(32)
-    sig_hex.push(recovery_id.to_byte() + 27); // v
+    let mut sig_out = Vec::with_capacity(65);
+    sig_out.extend_from_slice(&sig_bytes); // r(32) || s(32)
+    sig_out.push(recovery_id.to_byte() + 27); // v
 
     let nonce_hex = format!("0x{}", hex::encode(&nonce));
-    let sig_out = format!("0x{}", hex::encode(&sig_hex));
+    let sig_hex = format!("0x{}", hex::encode(&sig_out));
 
-    Ok((sig_out, nonce_hex, created_at, expires_at))
+    Ok((sig_hex, nonce_hex, created_at, expires_at))
 }
 
 fn hash_to_field(input: &[u8]) -> [u8; 32] {
