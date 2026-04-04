@@ -98,6 +98,18 @@ fn main() {
                 .env("BT_WS_BIND")
                 .help("WebSocket proxy bind address (e.g. 0.0.0.0:8443)")
                 .default_value(""),
+            Arg::new("ws-connect")
+                .long("ws-connect")
+                .takes_value(true)
+                .env("BT_WS_CONNECT")
+                .help("Client WS bridge: connect to server WS URL (e.g. ws://1.2.3.4:8443)")
+                .default_value(""),
+            Arg::new("ws-local-port")
+                .long("ws-local-port")
+                .takes_value(true)
+                .env("BT_WS_LOCAL_PORT")
+                .help("Client WS bridge: local UDP port for boringtun ↔ bridge")
+                .default_value("51821"),
             #[cfg(target_os = "linux")]
             Arg::new("disable-multi-queue")
                 .long("disable-multi-queue")
@@ -197,11 +209,13 @@ fn main() {
 
     tracing::info!("BoringTun started successfully");
 
-    // HTTP registration API (server mode only)
+    // Payment features: server API, WS proxy, client WS bridge
     #[cfg(feature = "payment")]
     {
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
 
         let is_server = std::env::var("BT_PAYMENT_SERVER")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -233,8 +247,6 @@ fn main() {
                 snapshot,
                 public_ip,
             ));
-
-            let shutdown_flag = Arc::new(AtomicBool::new(false));
 
             // HTTP server thread
             let state_http = Arc::clone(&state);
@@ -286,6 +298,31 @@ fn main() {
 
                 tracing::info!("WebSocket proxy on {}", ws_bind_log);
             }
+        }
+
+        // Client-side WS bridge (connects to remote server's WS proxy)
+        let ws_connect = std::env::var("BT_WS_CONNECT")
+            .unwrap_or_else(|_| matches.value_of("ws-connect").unwrap_or("").to_string());
+        if !ws_connect.is_empty() {
+            let ws_local_port: u16 = std::env::var("BT_WS_LOCAL_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| matches.value_of_t("ws-local-port").unwrap_or(51821));
+
+            let shutdown_bridge = Arc::clone(&shutdown_flag);
+            let ws_url = ws_connect.clone();
+            std::thread::Builder::new()
+                .name("ws-bridge".into())
+                .spawn(move || {
+                    boringtun::device::ws_bridge::run_ws_bridge(
+                        ws_local_port,
+                        &ws_url,
+                        shutdown_bridge,
+                    );
+                })
+                .expect("Failed to spawn WS bridge thread");
+
+            tracing::info!("WS bridge: UDP :{} ↔ {}", ws_local_port, ws_connect);
         }
     }
 

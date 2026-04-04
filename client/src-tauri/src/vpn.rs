@@ -29,6 +29,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 const API_BASE: &str = "http://37.27.29.160:8080";
 const SERVER_IP: &str = "37.27.29.160";
+const SERVER_WS_PORT: u16 = 8443;
+const WS_LOCAL_PORT: u16 = 51821;
 const GATEWAY_API: &str = "https://gateway-api-testnet.circle.com";
 const ARC_DOMAIN: u32 = 26;
 
@@ -174,7 +176,7 @@ impl VpnManager {
             .unwrap_or(&assigned_ip)
             .to_string();
 
-        log::info!("[vpn] registered: server_pub={server_pub} ip={assigned_ip} endpoint={endpoint}");
+        log::info!("[vpn] registered: server_pub={server_pub} ip={assigned_ip} endpoint={endpoint} ws={ws_url}", ws_url = format!("ws://{}:{}", SERVER_IP, SERVER_WS_PORT));
 
         // ── 3. Launch boringtun-cli ────────────────────────────────────────
         kill_stale_boringtun();
@@ -185,11 +187,14 @@ impl VpnManager {
             .map_err(|e| format!("Failed to create boringtun log: {e}"))?;
         let bt_err = bt_log.try_clone()
             .map_err(|e| format!("Failed to clone log handle: {e}"))?;
+        let ws_url = format!("ws://{}:{}", SERVER_IP, SERVER_WS_PORT);
         let proc = Command::new("sudo")
             .arg(&boringtun_path)
             .arg(&iface)
             .arg("--disable-drop-privileges")
             .arg("--foreground")
+            .env("BT_WS_CONNECT", &ws_url)
+            .env("BT_WS_LOCAL_PORT", WS_LOCAL_PORT.to_string())
             .stdout(std::process::Stdio::from(bt_log))
             .stderr(std::process::Stdio::from(bt_err))
             .spawn()
@@ -211,8 +216,9 @@ impl VpnManager {
             return Err(e);
         }
 
-        // ── 5. Configure WireGuard peer ────────────────────────────────────
-        if let Err(e) = configure_wireguard(&iface, &priv_b64, &server_pub, &endpoint) {
+        // ── 5. Configure WireGuard peer (via local WS bridge) ─────────────
+        let ws_endpoint = format!("127.0.0.1:{}", WS_LOCAL_PORT);
+        if let Err(e) = configure_wireguard(&iface, &priv_b64, &server_pub, &ws_endpoint) {
             cleanup.run();
             return Err(e);
         }
