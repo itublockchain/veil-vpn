@@ -544,7 +544,7 @@ fn configure_full_tunnel(iface: &str, server_ip: &str, original_gw: &str) -> Res
     // 1. Explicit route for server via original gateway on physical interface
     //    This MUST come before the split routes so WG UDP packets bypass the tunnel
     run_sudo(&[
-        "route", "add", "-host", server_ip, "-gateway", original_gw, "-ifscope", &phys_iface,
+        "route", "add", "-host", server_ip, original_gw,
     ])?;
     // 2. Split default: 0.0.0.0/1 + 128.0.0.0/1 override default without deleting it
     run_sudo(&["route", "add", "-net", "0.0.0.0/1", "-interface", iface])?;
