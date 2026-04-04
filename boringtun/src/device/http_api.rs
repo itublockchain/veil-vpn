@@ -476,28 +476,45 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
 
         let mut inner = state.inner.lock().unwrap();
 
+        // Debug: dump UAPI keys vs registered keys for comparison
+        let uapi_keys: Vec<&String> = uapi_peers.keys().collect();
+        let reg_keys: Vec<&String> = inner.peer_to_octet.keys().collect();
+        tracing::info!(
+            uapi_count = uapi_peers.len(),
+            reg_count = inner.peer_to_octet.len(),
+            uapi_keys = ?uapi_keys,
+            reg_keys = ?reg_keys,
+            "Reaper: UAPI vs registered"
+        );
+
         // Identify stale peers
         let mut to_remove = Vec::new();
         for (pubkey_hex, &octet) in inner.peer_to_octet.iter() {
-            match uapi_peers.get(pubkey_hex) {
+            let uapi_lookup = uapi_peers.get(pubkey_hex);
+            tracing::info!(
+                reg_key = %pubkey_hex,
+                found_in_uapi = uapi_lookup.is_some(),
+                "Reaper: lookup result"
+            );
+            match uapi_lookup {
                 Some(Some(handshake_sec)) if *handshake_sec > 0 => {
-                    // Has handshaked before — check if stale
-                    if now_epoch.saturating_sub(*handshake_sec) > STALE_PEER_SECS {
+                    let age = now_epoch.saturating_sub(*handshake_sec);
+                    tracing::info!(age_secs = age, threshold = STALE_PEER_SECS, "Reaper: has handshake");
+                    if age > STALE_PEER_SECS {
                         to_remove.push((pubkey_hex.clone(), octet));
                     }
                 }
                 Some(Some(_)) | Some(None) => {
-                    // Never handshaked (0 or missing). P1-A fix: check registration time.
                     if let Some(registered_at) = inner.peer_registered_at.get(pubkey_hex) {
-                        if now_instant.duration_since(*registered_at).as_secs()
-                            > STALE_NEVER_CONNECTED_SECS
-                        {
+                        let age = now_instant.duration_since(*registered_at).as_secs();
+                        tracing::info!(age_secs = age, threshold = STALE_NEVER_CONNECTED_SECS, "Reaper: never handshaked");
+                        if age > STALE_NEVER_CONNECTED_SECS {
                             to_remove.push((pubkey_hex.clone(), octet));
                         }
                     }
                 }
                 None => {
-                    // Peer in our map but not in UAPI — removed externally
+                    tracing::warn!(reg_key = %pubkey_hex, "Reaper: NOT FOUND in UAPI — will remove");
                     to_remove.push((pubkey_hex.clone(), octet));
                 }
             }
