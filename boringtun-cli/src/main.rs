@@ -3,6 +3,20 @@
 
 use boringtun::device::drop_privileges::drop_privileges;
 use boringtun::device::{DeviceConfig, DeviceHandle};
+
+/// Find the actual UAPI socket name for an interface.
+/// On macOS, "utun" becomes "utun6" etc. Scan /var/run/wireguard/ for a matching socket.
+#[cfg(feature = "payment")]
+fn find_uapi_interface(hint: &str) -> Option<String> {
+    let dir = std::fs::read_dir("/var/run/wireguard/").ok()?;
+    for entry in dir.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(hint) && name.ends_with(".sock") {
+            return Some(name.trim_end_matches(".sock").to_string());
+        }
+    }
+    None
+}
 use clap::{Arg, Command};
 use daemonize::Daemonize;
 use std::fs::File;
@@ -176,6 +190,70 @@ fn main() {
     drop(sock1);
 
     tracing::info!("BoringTun started successfully");
+
+    // HTTP registration API (server mode only)
+    #[cfg(feature = "payment")]
+    {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let is_server = std::env::var("BT_PAYMENT_SERVER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if is_server {
+            let bind_addr = std::env::var("BT_HTTP_BIND")
+                .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+            let public_ip = std::env::var("BT_PUBLIC_IP")
+                .unwrap_or_else(|_| "127.0.0.1".to_string());
+
+            let payment_config = boringtun::payment::PaymentConfig::default();
+            let snapshot = boringtun::device::http_api::PaymentConfigSnapshot {
+                chain_id: payment_config.chain_id,
+                gateway_wallet: payment_config.gateway_wallet,
+                usdc_contract: payment_config.usdc_contract,
+                amount_per_quota: payment_config.amount_per_quota,
+                quota_bytes: payment_config.quota_bytes,
+            };
+
+            // On macOS, "utun" gets assigned as "utun6" etc. Find the actual socket.
+            let actual_tun_name = find_uapi_interface(tun_name)
+                .unwrap_or_else(|| tun_name.to_string());
+            tracing::info!("Registration API using interface: {}", actual_tun_name);
+
+            let state = Arc::new(boringtun::device::http_api::RegistrationState::new(
+                actual_tun_name,
+                [10, 0, 0],
+                snapshot,
+                public_ip,
+            ));
+
+            let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+            // HTTP server thread
+            let state_http = Arc::clone(&state);
+            let shutdown_http = Arc::clone(&shutdown_flag);
+            let bind = bind_addr.clone();
+            std::thread::Builder::new()
+                .name("http-api".into())
+                .spawn(move || {
+                    boringtun::device::http_api::run_http_server(state_http, &bind, shutdown_http);
+                })
+                .expect("Failed to spawn HTTP API thread");
+
+            // Reaper thread
+            let state_reaper = Arc::clone(&state);
+            let shutdown_reaper = Arc::clone(&shutdown_flag);
+            std::thread::Builder::new()
+                .name("peer-reaper".into())
+                .spawn(move || {
+                    boringtun::device::http_api::run_reaper(state_reaper, shutdown_reaper);
+                })
+                .expect("Failed to spawn reaper thread");
+
+            tracing::info!("Registration API on {}", bind_addr);
+        }
+    }
 
     device_handle.wait();
 }

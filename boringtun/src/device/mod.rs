@@ -3,6 +3,8 @@
 
 pub mod allowed_ips;
 pub mod api;
+#[cfg(feature = "payment")]
+pub mod http_api;
 mod dev_lock;
 pub mod drop_privileges;
 #[cfg(test)]
