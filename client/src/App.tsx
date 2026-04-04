@@ -29,13 +29,15 @@ interface HealthEvent {
 }
 
 interface Server {
-  name: string;
+  ens: string;
   region: string;
   ip: string;
 }
 
 const SERVERS: Server[] = [
-  { name: "FRANKFURT", region: "EU", ip: "37.27.29.160" },
+  { ens: "ethglobal.veilvpn.eth", region: "EU", ip: "37.27.29.160" },
+  { ens: "silk.veilvpn.eth", region: "US", ip: "37.27.29.160" },
+  { ens: "ghost.veilvpn.eth", region: "APAC", ip: "37.27.29.160" },
 ];
 
 export default function App() {
@@ -48,6 +50,7 @@ export default function App() {
   const [selectedServer, setSelectedServer] = useState<Server>(SERVERS[0]);
   const [ensInput, setEnsInput] = useState("");
   const [copied, setCopied] = useState(false);
+  const [nodesOpen, setNodesOpen] = useState(false);
 
   // Load wallet info on mount + auto-refresh every 3s
   useEffect(() => {
@@ -160,7 +163,12 @@ export default function App() {
       {/* Header */}
       <div className="header">
         <span className="header-label">VEIL://VPN</span>
-        <span className="header-id">v0.1.0</span>
+        <div className={`header-status ${isConnected ? "on" : ""} ${isError ? "err" : ""}`}>
+          <span className={`status-dot ${isConnected ? "on" : ""} ${isError ? "err" : ""}`} />
+          <span className="header-status-text">
+            {isConnected ? "SECURED" : isError ? "ERROR" : isLoading ? "ROUTING..." : "UNSECURED"}
+          </span>
+        </div>
       </div>
 
       {/* Wallet section */}
@@ -179,50 +187,62 @@ export default function App() {
         </div>
       )}
 
-      {/* Status bar */}
-      <div className={`status-bar ${isConnected ? "on" : ""} ${isError ? "err" : ""}`}>
-        <div className="status-left">
-          <span className={`status-dot ${isConnected ? "on" : ""} ${isError ? "err" : ""}`} />
-          <span className="status-text">
-            {isConnected ? "SECURED" : isError ? "ERROR" : isLoading ? "ROUTING..." : "UNSECURED"}
-          </span>
+      {/* Connected info */}
+      {assignedIp && isConnected && (
+        <div className="connected-bar">
+          <span className="connected-ip">{assignedIp}</span>
+          {health && health.handshake_age_secs !== null && (
+            <span className="connected-ping">{health.handshake_age_secs}s</span>
+          )}
         </div>
-        {assignedIp && isConnected && (
-          <span className="status-ip">{assignedIp}</span>
-        )}
-        {health && isConnected && health.handshake_age_secs !== null && (
-          <span className="status-ping">{health.handshake_age_secs}s</span>
-        )}
-      </div>
+      )}
 
-      {/* Server list */}
-      <div className="section-label">NODES</div>
-      <div className="server-list">
-        {SERVERS.map((s) => (
-          <div
-            key={s.ip}
-            className={`server-row ${selectedServer.ip === s.ip ? "active" : ""}`}
-            onClick={() => !isConnected && setSelectedServer(s)}
-          >
-            <span className="server-name">{s.name}</span>
-            <span className="server-region">{s.region}</span>
-            <span className="server-ip">{s.ip}</span>
-            {selectedServer.ip === s.ip && <span className="server-dot" />}
+      {/* Node selector */}
+      <div className="node-selector">
+        <div
+          className={`node-selected ${nodesOpen ? "open" : ""}`}
+          onClick={() => !isConnected && !isLoading && setNodesOpen(!nodesOpen)}
+        >
+          <div className="node-selected-left">
+            <span className="node-selected-label">NODE</span>
+            <span className="node-selected-ens">{selectedServer.ens}</span>
           </div>
-        ))}
-      </div>
+          <div className="node-selected-right">
+            <span className="node-selected-region">{selectedServer.region}</span>
+            <span className={`node-chevron ${nodesOpen ? "open" : ""}`}>&#9662;</span>
+          </div>
+        </div>
 
-      {/* ENS input */}
-      <div className="ens-section">
-        <input
-          className="ens-input"
-          type="text"
-          placeholder="node.veil.eth"
-          value={ensInput}
-          onChange={(e) => setEnsInput(e.target.value)}
-          disabled={isConnected || isLoading}
-          spellCheck={false}
-        />
+        {nodesOpen && (
+          <div className="node-dropdown">
+            {SERVERS.map((s) => (
+              <div
+                key={s.ens}
+                className={`node-row ${selectedServer.ens === s.ens ? "active" : ""}`}
+                onClick={() => {
+                  setSelectedServer(s);
+                  setNodesOpen(false);
+                }}
+              >
+                <span className="node-row-ens">{s.ens}</span>
+                <span className="node-row-region">{s.region}</span>
+              </div>
+            ))}
+            <div className="node-custom" onClick={(e) => e.stopPropagation()}>
+              <div className="ens-input-wrap">
+                <input
+                  className="ens-input"
+                  type="text"
+                  placeholder="custom"
+                  value={ensInput}
+                  onChange={(e) => setEnsInput(e.target.value)}
+                  spellCheck={false}
+                />
+                <span className="ens-suffix">.veilvpn.eth</span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Error */}
