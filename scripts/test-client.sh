@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 KEYS_DIR="$SCRIPT_DIR/keys"
 
-SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
+SERVER_HOST="${SERVER_HOST:-37.27.29.160}"
 SERVER_HTTP_PORT="${SERVER_HTTP_PORT:-8089}"
 SERVER_WS_PORT="${SERVER_WS_PORT:-8443}"
 LOCAL_UDP_PORT=51821
@@ -79,6 +79,11 @@ ifconfig "$UTUN_NAME" "$ASSIGNED_IP" 10.0.0.1 up
 
 if [ "$FULL_TUNNEL" = "1" ]; then
     echo "[Route] Full tunnel — all traffic through VPN"
+    # Preserve route to server via original gateway to avoid routing loop
+    ORIG_GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')
+    if [ -n "$ORIG_GW" ]; then
+        route add -host "$SERVER_HOST" "$ORIG_GW" 2>/dev/null || true
+    fi
     route add -net 0.0.0.0/1 -interface "$UTUN_NAME" 2>/dev/null || true
     route add -net 128.0.0.0/1 -interface "$UTUN_NAME" 2>/dev/null || true
 else
@@ -101,6 +106,7 @@ echo ""
 cleanup() {
     echo "[Stop] Cleaning up..."
     if [ "$FULL_TUNNEL" = "1" ]; then
+        route delete -host "$SERVER_HOST" 2>/dev/null || true
         route delete -net 0.0.0.0/1 2>/dev/null || true
         route delete -net 128.0.0.0/1 2>/dev/null || true
     else
