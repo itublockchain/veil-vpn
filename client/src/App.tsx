@@ -39,9 +39,9 @@ interface Server {
 }
 
 const SERVERS: Server[] = [
-  { ens: "ethglobal.veilvpn.eth", region: "EU", ip: "204.168.211.96", humanOnly: true },
-  { ens: "silk.veilvpn.eth", region: "EU", ip: "37.27.29.160", humanOnly: false },
-  { ens: "ghost.veilvpn.eth", region: "APAC", ip: "204.168.211.96", humanOnly: false },
+  { ens: "ethglobal.veil.eth", region: "EU", ip: "37.27.29.160", humanOnly: false },
+  { ens: "vitalik.veil.eth", region: "EU", ip: "37.27.29.160", humanOnly: false },
+  { ens: "satoshi.veil.eth", region: "US", ip: "204.168.211.96", humanOnly: true },
 ];
 
 export default function App() {
@@ -127,7 +127,7 @@ export default function App() {
     if (!ensInput.trim()) return;
     try {
       setError(null);
-      const fullName = `${ensInput.trim()}.teevpn.eth`;
+      const fullName = `${ensInput.trim()}.veil.eth`;
       const info = await invoke<{
         ens_name: string;
         is_human: boolean;
@@ -329,7 +329,7 @@ export default function App() {
                   onKeyDown={(e) => { if (e.key === "Enter") resolveEns(); }}
                   spellCheck={false}
                 />
-                <span className="ens-suffix">.teevpn.eth</span>
+                <span className="ens-suffix">.veil.eth</span>
                 <button className="ens-go" onClick={resolveEns} disabled={!ensInput.trim()}>GO</button>
               </div>
             </div>
