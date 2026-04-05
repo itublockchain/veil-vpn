@@ -356,7 +356,7 @@ export default function App() {
       {/* Footer */}
       <div className="footer">
         <span>PAY-AS-YOU-GO</span>
-        <span>0.01 USDC / 10MB</span>
+        <span>0.13 USDC / 10MB</span>
       </div>
     </div>
   );
