@@ -132,10 +132,14 @@ impl VpnManager {
         &mut self,
         app_handle: tauri::AppHandle,
         world_proof: Option<serde_json::Value>,
+        server_ip: Option<String>,
     ) -> Result<ConnectedInfo, String> {
         if self.ctx.is_some() {
             return Err("Already connected".into());
         }
+
+        let active_server_ip = server_ip.as_deref().unwrap_or(&SERVER_IP);
+        let active_api_base = format!("http://{}:8080", active_server_ip);
 
         // ── 1. Load or generate persistent key pair + derive wallet ────────
         let private = load_or_create_key()?;
@@ -158,7 +162,7 @@ impl VpnManager {
         }
 
         let resp = client
-            .post(format!("{}/v1/register", *API_BASE))
+            .post(format!("{}/v1/register", active_api_base))
             .json(&body)
             .send()
             .await
@@ -263,15 +267,16 @@ impl VpnManager {
         log::info!("[vpn] original gateway={original_gw} iface={original_phys_iface}");
 
         // ── 8. Configure full-tunnel routing ───────────────────────────────
-        if let Err(e) = configure_full_tunnel(&iface, &SERVER_IP, &original_gw) {
+        if let Err(e) = configure_full_tunnel(&iface, active_server_ip, &original_gw) {
             cleanup.run();
             return Err(e);
         }
 
         let iface_clone3 = iface.clone();
         let gw_clone = original_gw.clone();
+        let server_ip_clone = active_server_ip.to_string();
         cleanup.push("teardown routes", move || {
-            teardown_routes(&iface_clone3, &SERVER_IP, &gw_clone);
+            teardown_routes(&iface_clone3, &server_ip_clone, &gw_clone);
         });
 
         // ── 9. Set DNS ─────────────────────────────────────────────────────
@@ -296,7 +301,7 @@ impl VpnManager {
             original_gateway: original_gw,
             original_phys_iface,
             original_dns,
-            server_ip: SERVER_IP.clone(),
+            server_ip: active_server_ip.to_string(),
             health_cancel,
         });
 

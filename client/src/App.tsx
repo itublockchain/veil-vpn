@@ -40,7 +40,7 @@ interface Server {
 
 const SERVERS: Server[] = [
   { ens: "ethglobal.veilvpn.eth", region: "EU", ip: "204.168.211.96", humanOnly: true },
-  { ens: "silk.veilvpn.eth", region: "US", ip: "204.168.211.96", humanOnly: false },
+  { ens: "silk.veilvpn.eth", region: "EU", ip: "37.27.29.160", humanOnly: false },
   { ens: "ghost.veilvpn.eth", region: "APAC", ip: "204.168.211.96", humanOnly: false },
 ];
 
@@ -150,6 +150,7 @@ export default function App() {
       setStatus("connecting");
       const info = await invoke<ConnectedInfo>("connect", {
         worldProof: proof || null,
+        serverIp: selectedServer.ip,
       });
       setAssignedIp(info.assigned_ip);
       setWalletAddress(info.wallet_address);
@@ -180,7 +181,7 @@ export default function App() {
         try {
           setError(null);
           setWorldIdStatus("starting");
-          const url = await invoke<string>("start_world_id");
+          const url = await invoke<string>("start_world_id", { serverIp: selectedServer.ip });
           setWorldIdUrl(url);
           setWorldIdOpen(true);
           startWorldIdPoll();
@@ -260,7 +261,6 @@ export default function App() {
           onClick={() => !isConnected && !isLoading && setNodesOpen(!nodesOpen)}
         >
           <div className="node-selected-left">
-            <span className="node-selected-label">NODE</span>
             <span className="node-selected-ens">{selectedServer.ens}</span>
           </div>
           <div className="node-selected-right">

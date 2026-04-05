@@ -21,6 +21,7 @@ async fn connect(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     world_proof: Option<serde_json::Value>,
+    server_ip: Option<String>,
 ) -> Result<ConnectedInfo, String> {
     // Emit connecting state
     let _ = app.emit(
@@ -32,7 +33,7 @@ async fn connect(
         },
     );
 
-    let result = state.vpn.lock().await.connect(app.clone(), world_proof).await;
+    let result = state.vpn.lock().await.connect(app.clone(), world_proof, server_ip).await;
 
     match &result {
         Ok(info) => {
@@ -106,12 +107,16 @@ fn get_pubkey() -> Result<String, String> {
 #[tauri::command]
 async fn start_world_id(
     state: tauri::State<'_, AppState>,
+    server_ip: Option<String>,
 ) -> Result<String, String> {
     use idkit::bridge::{BridgeConnectionParams, RequestKind, Environment};
     use idkit::{AppId, RpContext, VerificationLevel, Preset};
 
     // 1. Fetch RP context from VPN server
-    let api_base = vpn::api_base();
+    let api_base = match &server_ip {
+        Some(ip) => format!("http://{}:8080", ip),
+        None => vpn::api_base(),
+    };
     let resp: serde_json::Value = reqwest::get(format!("{}/v1/rp-context", api_base))
         .await
         .map_err(|e| format!("Failed to reach server: {e}"))?
