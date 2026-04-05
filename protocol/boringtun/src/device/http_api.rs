@@ -409,6 +409,7 @@ fn verify_world_proof(
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 VeilVPN/1.0")
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
