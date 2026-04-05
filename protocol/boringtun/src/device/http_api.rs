@@ -135,7 +135,9 @@ impl RegistrationState {
 // === UAPI Client ===
 
 /// Query UAPI get=1. Returns map of hex_pubkey → Option<last_handshake_time_sec>.
-fn uapi_get_peers(tun_name: &str) -> Result<(Option<String>, Option<u16>, HashMap<String, Option<u64>>), String> {
+fn uapi_get_peers(
+    tun_name: &str,
+) -> Result<(Option<String>, Option<u16>, HashMap<String, Option<u64>>), String> {
     let path = format!("{}/{}.sock", UAPI_SOCK_DIR, tun_name);
     let stream = UnixStream::connect(&path).map_err(|e| format!("UAPI connect: {}", e))?;
     stream.set_read_timeout(Some(UAPI_TIMEOUT)).ok();
@@ -222,7 +224,9 @@ fn uapi_set_peer(tun_name: &str, pubkey_hex: &str, allowed_ip: Ipv4Addr) -> Resu
 
     let mut reader = BufReader::new(&stream);
     let mut response = String::new();
-    reader.read_line(&mut response).map_err(|e| format!("UAPI read: {}", e))?;
+    reader
+        .read_line(&mut response)
+        .map_err(|e| format!("UAPI read: {}", e))?;
 
     if response.trim() == "errno=0" {
         Ok(())
@@ -246,9 +250,70 @@ fn uapi_remove_peer(tun_name: &str, pubkey_hex: &str) -> Result<bool, String> {
 
     let mut reader = BufReader::new(&stream);
     let mut response = String::new();
-    reader.read_line(&mut response).map_err(|e| format!("UAPI read: {}", e))?;
+    reader
+        .read_line(&mut response)
+        .map_err(|e| format!("UAPI read: {}", e))?;
 
     Ok(response.trim() == "errno=0")
+}
+
+// === Kernel Route Management ===
+
+/// Add a /32 host route for a client IP via the TUN interface.
+/// Without this, the kernel has no route to deliver decrypted response packets
+/// back into the tunnel (since we use /32 on the interface to prevent loops).
+fn add_kernel_route(tun_name: &str, ip: Ipv4Addr) {
+    let result = if cfg!(target_os = "linux") {
+        std::process::Command::new("ip")
+            .args(["route", "add", &format!("{}/32", ip), "dev", tun_name])
+            .output()
+    } else {
+        std::process::Command::new("route")
+            .args(["add", "-host", &ip.to_string(), "-interface", tun_name])
+            .output()
+    };
+    match result {
+        Ok(out) if out.status.success() => {
+            tracing::info!(ip = %ip, tun = %tun_name, "Kernel route added");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // "File exists" / "RTNETLINK: File exists" means route already present — not an error
+            if stderr.contains("exist") {
+                tracing::debug!(ip = %ip, "Kernel route already exists");
+            } else {
+                tracing::warn!(ip = %ip, stderr = %stderr, "Failed to add kernel route");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(ip = %ip, error = %e, "Failed to run route command");
+        }
+    }
+}
+
+/// Remove a /32 host route when a peer is reaped.
+fn remove_kernel_route(tun_name: &str, ip: Ipv4Addr) {
+    let result = if cfg!(target_os = "linux") {
+        std::process::Command::new("ip")
+            .args(["route", "del", &format!("{}/32", ip), "dev", tun_name])
+            .output()
+    } else {
+        std::process::Command::new("route")
+            .args(["delete", "-host", &ip.to_string(), "-interface", tun_name])
+            .output()
+    };
+    match result {
+        Ok(out) if out.status.success() => {
+            tracing::info!(ip = %ip, tun = %tun_name, "Kernel route removed");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::debug!(ip = %ip, stderr = %stderr, "Kernel route removal note");
+        }
+        Err(e) => {
+            tracing::warn!(ip = %ip, error = %e, "Failed to run route delete command");
+        }
+    }
 }
 
 // === Registration Handler ===
@@ -258,8 +323,14 @@ fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, 
     let pubkey_bytes = match base64::decode(pubkey_base64.trim()) {
         Ok(bytes) if bytes.len() == 32 => bytes,
         Ok(bytes) => {
-            tracing::warn!("Registration rejected: invalid key length {} bytes", bytes.len());
-            return (400, r#"{"error":"public key must be exactly 32 bytes"}"#.into());
+            tracing::warn!(
+                "Registration rejected: invalid key length {} bytes",
+                bytes.len()
+            );
+            return (
+                400,
+                r#"{"error":"public key must be exactly 32 bytes"}"#.into(),
+            );
         }
         Err(_) => {
             tracing::warn!("Registration rejected: invalid base64");
@@ -298,11 +369,18 @@ fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, 
                 state.subnet_prefix[2],
                 octet,
             );
-            return (200, build_success_response(
-                ip, &state.payment_config, &state.public_ip,
-                inner.server_pubkey_cache.as_deref().unwrap_or(""),
-                inner.listen_port_cache.unwrap_or(51820),
-            ));
+            // Re-ensure kernel route exists (may be lost after server restart)
+            // add_kernel_route(&state.tun_name, ip);
+            return (
+                200,
+                build_success_response(
+                    ip,
+                    &state.payment_config,
+                    &state.public_ip,
+                    inner.server_pubkey_cache.as_deref().unwrap_or(""),
+                    inner.listen_port_cache.unwrap_or(51820),
+                ),
+            );
         }
     }
 
@@ -327,7 +405,12 @@ fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, 
             inner.available_ips.remove(&octet);
             inner.registered_peers.insert(pubkey_hex.clone());
             inner.peer_to_octet.insert(pubkey_hex.clone(), octet);
-            inner.peer_registered_at.insert(pubkey_hex.clone(), Instant::now());
+            inner
+                .peer_registered_at
+                .insert(pubkey_hex.clone(), Instant::now());
+
+            // Add kernel route so the OS knows how to reach this client via the TUN
+            // add_kernel_route(&state.tun_name, assigned_ip);
 
             tracing::info!(
                 pubkey = %pubkey_hex,
@@ -336,11 +419,16 @@ fn handle_registration(state: &RegistrationState, pubkey_base64: &str) -> (u16, 
                 "Peer registered"
             );
 
-            (200, build_success_response(
-                assigned_ip, &state.payment_config, &state.public_ip,
-                inner.server_pubkey_cache.as_deref().unwrap_or(""),
-                inner.listen_port_cache.unwrap_or(51820),
-            ))
+            (
+                200,
+                build_success_response(
+                    assigned_ip,
+                    &state.payment_config,
+                    &state.public_ip,
+                    inner.server_pubkey_cache.as_deref().unwrap_or(""),
+                    inner.listen_port_cache.unwrap_or(51820),
+                ),
+            )
         }
         Err(e) => {
             tracing::warn!(pubkey = %pubkey_hex, error = %e, "UAPI set_peer failed");
@@ -645,7 +733,10 @@ pub fn run_http_server(
             (tiny_http::Method::Post, "/v1/register") => {
                 let mut body_buf = Vec::new();
                 let reader = request.as_reader();
-                match reader.take(MAX_BODY_BYTES as u64 + 1).read_to_end(&mut body_buf) {
+                match reader
+                    .take(MAX_BODY_BYTES as u64 + 1)
+                    .read_to_end(&mut body_buf)
+                {
                     Ok(n) if n > MAX_BODY_BYTES => {
                         (413u16, r#"{"error":"request body too large"}"#.into())
                     }
@@ -737,7 +828,11 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
                 Some(Some(handshake_sec)) if *handshake_sec > 0 => {
                     // handshake_sec is a Duration (seconds since last handshake), NOT an epoch timestamp
                     let age = *handshake_sec;
-                    tracing::info!(age_secs = age, threshold = STALE_PEER_SECS, "Reaper: has handshake");
+                    tracing::info!(
+                        age_secs = age,
+                        threshold = STALE_PEER_SECS,
+                        "Reaper: has handshake"
+                    );
                     if age > STALE_PEER_SECS {
                         to_remove.push((pubkey_hex.clone(), octet));
                     }
@@ -745,7 +840,11 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
                 Some(Some(_)) | Some(None) => {
                     if let Some(registered_at) = inner.peer_registered_at.get(pubkey_hex) {
                         let age = now_instant.duration_since(*registered_at).as_secs();
-                        tracing::info!(age_secs = age, threshold = STALE_NEVER_CONNECTED_SECS, "Reaper: never handshaked");
+                        tracing::info!(
+                            age_secs = age,
+                            threshold = STALE_NEVER_CONNECTED_SECS,
+                            "Reaper: never handshaked"
+                        );
                         if age > STALE_NEVER_CONNECTED_SECS {
                             to_remove.push((pubkey_hex.clone(), octet));
                         }
@@ -764,15 +863,23 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
             match uapi_remove_peer(&state.tun_name, pubkey_hex) {
                 Ok(true) => {
                     // errno=0 — safe to update state
+                    let ip = Ipv4Addr::new(
+                        state.subnet_prefix[0],
+                        state.subnet_prefix[1],
+                        state.subnet_prefix[2],
+                        *octet,
+                    );
+                    // remove_kernel_route(&state.tun_name, ip);
+
                     inner.available_ips.insert(*octet);
                     inner.registered_peers.remove(pubkey_hex);
                     inner.peer_to_octet.remove(pubkey_hex);
                     inner.peer_registered_at.remove(pubkey_hex);
                     tracing::info!(
                         pubkey = %pubkey_hex,
-                        octet = octet,
+                        ip = %ip,
                         pool_remaining = inner.available_ips.len(),
-                        "Reaper: removed stale peer"
+                        "Reaper: removed stale peer + kernel route"
                     );
                 }
                 Ok(false) => {
@@ -795,9 +902,7 @@ pub fn run_reaper(state: Arc<RegistrationState>, shutdown_flag: Arc<AtomicBool>)
         // Prune old rate limiter entries (P2-A fix)
         {
             let mut rl = state.rate_limiter.lock().unwrap();
-            rl.retain(|_, bucket| {
-                bucket.last_refill.elapsed().as_secs() < RATE_LIMITER_PRUNE_SECS
-            });
+            rl.retain(|_, bucket| bucket.last_refill.elapsed().as_secs() < RATE_LIMITER_PRUNE_SECS);
         }
 
         if !to_remove.is_empty() {

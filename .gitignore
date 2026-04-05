@@ -1,8 +1,12 @@
 /target
 **/*.rs.bk
 .vscode/
+<<<<<<< HEAD
 .DS_Store
 .env.local
 .env
 !.env.example
 *.key
+=======
+*/node_modules
+>>>>>>> test-wg
