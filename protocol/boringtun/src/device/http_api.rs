@@ -412,6 +412,8 @@ fn verify_world_proof(
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
+    tracing::info!("World ID proof payload: {}", proof);
+
     let resp = client
         .post(&verify_url)
         .header("Content-Type", "application/json")
@@ -420,9 +422,14 @@ fn verify_world_proof(
         .map_err(|e| format!("World API request failed: {e}"))?;
 
     let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .map_err(|e| format!("World API parse failed: {e}"))?;
+    let body_text = resp
+        .text()
+        .map_err(|e| format!("World API read failed: {e}"))?;
+
+    tracing::info!("World API raw response [{}]: {}", status, body_text);
+
+    let body: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| format!("World API parse failed: {e} body={body_text}"))?;
 
     tracing::info!("World API response [{}]: {}", status, body);
 
