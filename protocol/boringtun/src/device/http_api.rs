@@ -371,17 +371,17 @@ fn handle_registration_v2(state: &RegistrationState, body: &str) -> (u16, String
             None => return (400, r#"{"error":"world_proof required for human-only nodes"}"#.into()),
         };
 
-        // Verify with World API
+        // Verify with World API (or accept if already verified)
         match verify_world_proof(state, world_proof) {
             Ok(nullifier) => {
-                let inner = state.inner.lock().unwrap();
+                let mut inner = state.inner.lock().unwrap();
                 if inner.used_nullifiers.contains(&nullifier) {
-                    return (403, r#"{"error":"already verified (one human = one connection)"}"#.into());
+                    tracing::info!("Known human reconnecting, nullifier: {}", nullifier);
+                } else {
+                    tracing::info!("New human verified, nullifier: {}", nullifier);
+                    inner.used_nullifiers.insert(nullifier);
                 }
                 drop(inner);
-                // Nullifier will be stored after successful peer creation below
-                // Store it now to prevent race conditions
-                state.inner.lock().unwrap().used_nullifiers.insert(nullifier);
             }
             Err(e) => {
                 tracing::warn!("World ID verification failed: {}", e);
