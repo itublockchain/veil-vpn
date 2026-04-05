@@ -1,0 +1,50 @@
+services:
+  tee-vpn:
+    build:
+      context: ..
+      dockerfile: tee-service/Dockerfile
+    container_name: tee-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "8080:8080"    # HTTP registration API
+      - "8443:8443"    # WebSocket proxy
+      - "51820:51820/udp"  # WireGuard UDP (direct)
+    volumes:
+      - vpn-data:/app/data
+    environment:
+      # --- Server ---
+      - BT_PAYMENT_SERVER=1
+      - BT_HTTP_BIND=0.0.0.0:8080
+      - BT_WS_BIND=0.0.0.0:8443
+      - BT_WG_PORT=51820
+      - BT_PUBLIC_IP=${PUBLIC_IP:-127.0.0.1}
+      - WG_LOG_LEVEL=info
+      # --- Payment ---
+      - BT_CHAIN_ID=5042002
+      - BT_USDC_CONTRACT=3600000000000000000000000000000000000000
+      - BT_GATEWAY_WALLET=0077777d7EBA4688BDeF3E311b846F25870A19B9
+      - BT_QUOTA_MB=10
+      - BT_PAYMENT_AMOUNT=10000
+      - BT_RPC_URL=https://rpc.testnet.arc.network
+      - BT_GATEWAY_API=https://payment-gateway.testnet.arc.network
+      # --- TEE Registration ---
+      - PUBLIC_IP=${PUBLIC_IP:-127.0.0.1}
+      - HTTP_PORT=8080
+      - WS_PORT=8443
+      - LABEL=${LABEL:-node-001}
+      # --- ENS (Sepolia) ---
+      - SEPOLIA_RPC_URL=${SEPOLIA_RPC_URL}
+      - FOREVER_REGISTRAR=${FOREVER_REGISTRAR}
+      - PARENT_NODE=${PARENT_NODE}
+      - PUBLIC_RESOLVER=${PUBLIC_RESOLVER:-0x8FADE66B79cC9f707aB26799354482EB93a5B7dD}
+      # --- Sapphire ---
+      - SAPPHIRE_RPC_URL=${SAPPHIRE_RPC_URL:-https://testnet.sapphire.oasis.io}
+      - TEE_REGISTRY=${TEE_REGISTRY}
+      - PRIVATE_KEY=${PRIVATE_KEY}
+    restart: unless-stopped
+
+volumes:
+  vpn-data:

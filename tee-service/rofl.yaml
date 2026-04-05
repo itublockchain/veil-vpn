@@ -1,0 +1,21 @@
+name: veil-vpn
+version: 0.1.0
+author: veil-vpn
+license: MIT
+tee: tdx
+kind: container
+resources:
+  memory: 1024
+  cpus: 2
+  storage:
+    kind: disk-persistent
+    size: 1024
+artifacts:
+  container:
+    compose: compose.yaml
+deployments:
+  testnet:
+    # Set after running: oasis rofl create --network testnet
+    app_id: ""
+    network: testnet
+    paratime: sapphire
