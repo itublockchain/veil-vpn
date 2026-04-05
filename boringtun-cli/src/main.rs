@@ -92,6 +92,24 @@ fn main() {
             Arg::new("disable-connected-udp")
                 .long("disable-connected-udp")
                 .help("Disable connected UDP sockets to each peer"),
+            Arg::new("ws-bind")
+                .long("ws-bind")
+                .takes_value(true)
+                .env("BT_WS_BIND")
+                .help("WebSocket proxy bind address (e.g. 0.0.0.0:8443)")
+                .default_value(""),
+            Arg::new("ws-connect")
+                .long("ws-connect")
+                .takes_value(true)
+                .env("BT_WS_CONNECT")
+                .help("Client WS bridge: connect to server WS URL (e.g. ws://1.2.3.4:8443)")
+                .default_value(""),
+            Arg::new("ws-local-port")
+                .long("ws-local-port")
+                .takes_value(true)
+                .env("BT_WS_LOCAL_PORT")
+                .help("Client WS bridge: local UDP port for boringtun ↔ bridge")
+                .default_value("51821"),
             #[cfg(target_os = "linux")]
             Arg::new("disable-multi-queue")
                 .long("disable-multi-queue")
@@ -191,21 +209,23 @@ fn main() {
 
     tracing::info!("BoringTun started successfully");
 
-    // HTTP registration API (server mode only)
+    // Payment features: server API, WS proxy, client WS bridge
     #[cfg(feature = "payment")]
     {
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
 
         let is_server = std::env::var("BT_PAYMENT_SERVER")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
         if is_server {
-            let bind_addr = std::env::var("BT_HTTP_BIND")
-                .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-            let public_ip = std::env::var("BT_PUBLIC_IP")
-                .unwrap_or_else(|_| "127.0.0.1".to_string());
+            let bind_addr =
+                std::env::var("BT_HTTP_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+            let public_ip =
+                std::env::var("BT_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
 
             let payment_config = boringtun::payment::PaymentConfig::default();
             let snapshot = boringtun::device::http_api::PaymentConfigSnapshot {
@@ -217,8 +237,8 @@ fn main() {
             };
 
             // On macOS, "utun" gets assigned as "utun6" etc. Find the actual socket.
-            let actual_tun_name = find_uapi_interface(tun_name)
-                .unwrap_or_else(|| tun_name.to_string());
+            let actual_tun_name =
+                find_uapi_interface(tun_name).unwrap_or_else(|| tun_name.to_string());
             tracing::info!("Registration API using interface: {}", actual_tun_name);
 
             let state = Arc::new(boringtun::device::http_api::RegistrationState::new(
@@ -227,8 +247,6 @@ fn main() {
                 snapshot,
                 public_ip,
             ));
-
-            let shutdown_flag = Arc::new(AtomicBool::new(false));
 
             // HTTP server thread
             let state_http = Arc::clone(&state);
@@ -252,6 +270,59 @@ fn main() {
                 .expect("Failed to spawn reaper thread");
 
             tracing::info!("Registration API on {}", bind_addr);
+
+            // WebSocket proxy thread
+            let ws_bind = std::env::var("BT_WS_BIND")
+                .unwrap_or_else(|_| matches.value_of("ws-bind").unwrap_or("").to_string());
+            if !ws_bind.is_empty() {
+                let wg_port: u16 = std::env::var("BT_WG_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(51820);
+                let shutdown_ws = Arc::clone(&shutdown_flag);
+                let ws_bind_log = ws_bind.clone();
+                std::thread::Builder::new()
+                    .name("ws-proxy".into())
+                    .spawn(move || {
+                        if let Err(e) = std::panic::catch_unwind(|| {
+                            boringtun::device::ws_proxy::run_ws_proxy(
+                                &ws_bind,
+                                wg_port,
+                                shutdown_ws,
+                            );
+                        }) {
+                            tracing::error!("WS proxy thread panicked: {:?}", e);
+                        }
+                    })
+                    .expect("Failed to spawn WS proxy thread");
+
+                tracing::info!("WebSocket proxy on {}", ws_bind_log);
+            }
+        }
+
+        // Client-side WS bridge (connects to remote server's WS proxy)
+        let ws_connect = std::env::var("BT_WS_CONNECT")
+            .unwrap_or_else(|_| matches.value_of("ws-connect").unwrap_or("").to_string());
+        if !ws_connect.is_empty() {
+            let ws_local_port: u16 = std::env::var("BT_WS_LOCAL_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| matches.value_of_t("ws-local-port").unwrap_or(51821));
+
+            let shutdown_bridge = Arc::clone(&shutdown_flag);
+            let ws_url = ws_connect.clone();
+            std::thread::Builder::new()
+                .name("ws-bridge".into())
+                .spawn(move || {
+                    boringtun::device::ws_bridge::run_ws_bridge(
+                        ws_local_port,
+                        &ws_url,
+                        shutdown_bridge,
+                    );
+                })
+                .expect("Failed to spawn WS bridge thread");
+
+            tracing::info!("WS bridge: UDP :{} ↔ {}", ws_local_port, ws_connect);
         }
     }
 
