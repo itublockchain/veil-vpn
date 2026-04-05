@@ -152,7 +152,7 @@ async fn start_world_id(
         allow_legacy_proofs: true,
         override_connect_base_url: None,
         return_to: None,
-        environment: Some(Environment::Staging),
+        environment: Some(Environment::Production),
     };
 
     // 4. Create bridge session
