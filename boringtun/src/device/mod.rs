@@ -11,9 +11,15 @@ pub mod ws_bridge;
 pub mod ws_proxy;
 mod dev_lock;
 pub mod drop_privileges;
+#[cfg(feature = "payment")]
+pub mod http_api;
 #[cfg(test)]
 mod integration_tests;
 pub mod peer;
+#[cfg(feature = "payment")]
+pub mod ws_bridge;
+#[cfg(feature = "payment")]
+pub mod ws_proxy;
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #[path = "kqueue.rs"]
@@ -362,7 +368,10 @@ impl Device {
             peer.quota = Some(crate::payment::quota::BandwidthQuota::new(
                 crate::payment::quota::DEFAULT_QUOTA_BYTES,
             ));
-            tracing::info!("Peer added with {}MB quota", crate::payment::quota::DEFAULT_QUOTA_BYTES / 1024 / 1024);
+            tracing::info!(
+                "Peer added with {}MB quota",
+                crate::payment::quota::DEFAULT_QUOTA_BYTES / 1024 / 1024
+            );
         }
 
         let peer = Arc::new(Mutex::new(peer));
@@ -511,10 +520,16 @@ impl Device {
         {
             let key_bytes = private_key.to_bytes();
             let wallet = crate::payment::wallet::PaymentWallet::from_wireguard_key(&key_bytes);
-            let role = if self.payment_config.is_server { "server" } else { "client" };
+            let role = if self.payment_config.is_server {
+                "server"
+            } else {
+                "client"
+            };
             tracing::info!(
                 "Payment mode: {} | chain: {} | wallet: {}",
-                role, self.payment_config.chain_id, wallet.ethereum_address_hex()
+                role,
+                self.payment_config.chain_id,
+                wallet.ethereum_address_hex()
             );
             if !self.payment_config.is_server {
                 // Client: auto-deposit USDC into Gateway Wallet
@@ -526,11 +541,9 @@ impl Device {
             }
             self.payment_wallet = Some(Arc::new(wallet));
             if self.payment_config.is_server {
-                self.settlement_client = Some(
-                    crate::payment::settlement::SettlementClient::new(
-                        &self.payment_config.gateway_api_url,
-                    ),
-                );
+                self.settlement_client = Some(crate::payment::settlement::SettlementClient::new(
+                    &self.payment_config.gateway_api_url,
+                ));
                 tracing::info!("Settlement client: {}", self.payment_config.gateway_api_url);
             }
         }
@@ -722,15 +735,20 @@ impl Device {
                             {
                                 use crate::payment::protocol;
                                 if protocol::is_payment_signal(packet) {
-                                    if let Some(payload) = protocol::extract_signal_payload(packet) {
+                                    if let Some(payload) = protocol::extract_signal_payload(packet)
+                                    {
                                         if let Some(dst) = protocol::dst_ipv4(packet) {
                                             if dst == protocol::PAYMENT_GATEWAY_IP {
                                                 // Client → Server: PaymentSubmit
-                                                Self::handle_payment_submit(d, &mut p, payload, &udp, &addr);
+                                                Self::handle_payment_submit(
+                                                    d, &mut p, payload, &udp, &addr,
+                                                );
                                             } else if let Some(src) = protocol::src_ipv4(packet) {
                                                 if src == protocol::PAYMENT_GATEWAY_IP {
                                                     // Server → Client: handle on client side
-                                                    Self::handle_payment_signal_client(d, &mut p, payload, &udp, &addr);
+                                                    Self::handle_payment_signal_client(
+                                                        d, &mut p, payload, &udp, &addr,
+                                                    );
                                                 }
                                             }
                                         }
@@ -748,7 +766,9 @@ impl Device {
                                                 continue;
                                             }
                                             if !quota.consume(packet.len() as u64) {
-                                                tracing::info!("Peer quota exhausted (udp inbound v4)");
+                                                tracing::info!(
+                                                    "Peer quota exhausted (udp inbound v4)"
+                                                );
                                                 Self::send_payment_required(d, &mut p, &udp, &addr);
                                                 continue;
                                             }
@@ -851,19 +871,24 @@ impl Device {
                             {
                                 use crate::payment::protocol;
                                 if protocol::is_payment_signal(packet) {
-                                    if let Some(payload) = protocol::extract_signal_payload(packet) {
+                                    if let Some(payload) = protocol::extract_signal_payload(packet)
+                                    {
                                         if let Some(dst) = protocol::dst_ipv4(packet) {
                                             if dst == protocol::PAYMENT_GATEWAY_IP {
                                                 let sock_addr = socket2::SockAddr::from(
-                                                    p.endpoint().addr.unwrap()
+                                                    p.endpoint().addr.unwrap(),
                                                 );
-                                                Self::handle_payment_submit(d, &mut p, payload, &udp, &sock_addr);
+                                                Self::handle_payment_submit(
+                                                    d, &mut p, payload, &udp, &sock_addr,
+                                                );
                                             } else if let Some(src) = protocol::src_ipv4(packet) {
                                                 if src == protocol::PAYMENT_GATEWAY_IP {
                                                     let sock_addr = socket2::SockAddr::from(
-                                                        p.endpoint().addr.unwrap()
+                                                        p.endpoint().addr.unwrap(),
                                                     );
-                                                    Self::handle_payment_signal_client(d, &mut p, payload, &udp, &sock_addr);
+                                                    Self::handle_payment_signal_client(
+                                                        d, &mut p, payload, &udp, &sock_addr,
+                                                    );
                                                 }
                                             }
                                         }
@@ -880,11 +905,15 @@ impl Device {
                                                 continue;
                                             }
                                             if !quota.consume(packet.len() as u64) {
-                                                tracing::info!("Peer quota exhausted (conn inbound v4)");
-                                                let sock_addr = socket2::SockAddr::from(
-                                                    p.endpoint().addr.unwrap()
+                                                tracing::info!(
+                                                    "Peer quota exhausted (conn inbound v4)"
                                                 );
-                                                Self::send_payment_required(d, &mut p, &udp, &sock_addr);
+                                                let sock_addr = socket2::SockAddr::from(
+                                                    p.endpoint().addr.unwrap(),
+                                                );
+                                                Self::send_payment_required(
+                                                    d, &mut p, &udp, &sock_addr,
+                                                );
                                                 continue;
                                             }
                                         }
@@ -902,7 +931,9 @@ impl Device {
                                             continue;
                                         }
                                         if !quota.consume(packet.len() as u64) {
-                                            tracing::info!("Peer quota exhausted (conn inbound v6)");
+                                            tracing::info!(
+                                                "Peer quota exhausted (conn inbound v6)"
+                                            );
                                             continue;
                                         }
                                     }
@@ -1069,7 +1100,9 @@ impl Device {
                 tracing::info!("PaymentRequired sent to peer {}", peer_ip);
             }
             TunnResult::Err(e) => tracing::error!("Failed to encapsulate PaymentRequired: {:?}", e),
-            _ => tracing::warn!("Unexpected encapsulate result for PaymentRequired (no active session?)"),
+            _ => tracing::warn!(
+                "Unexpected encapsulate result for PaymentRequired (no active session?)"
+            ),
         }
     }
 
@@ -1081,8 +1114,8 @@ impl Device {
         udp: &socket2::Socket,
         addr: &socket2::SockAddr,
     ) {
-        use crate::payment::protocol::*;
         use crate::payment::eip3009;
+        use crate::payment::protocol::*;
 
         let wallet = match d.payment_wallet.as_ref() {
             Some(w) => w,
@@ -1168,11 +1201,15 @@ impl Device {
                     Some((IpAddr::V4(ip), _)) => ip,
                     _ => return,
                 };
-                let accepted = PaymentAccepted { new_quota_bytes: d.payment_config.quota_bytes };
+                let accepted = PaymentAccepted {
+                    new_quota_bytes: d.payment_config.quota_bytes,
+                };
                 let tlv = accepted.encode();
                 let ip_packet = build_signal_packet(PAYMENT_GATEWAY_IP, peer_ip, &tlv);
                 let mut enc_buf = [0u8; MAX_PAYMENT_PACKET_SIZE];
-                if let TunnResult::WriteToNetwork(enc) = p.tunnel.encapsulate(&ip_packet, &mut enc_buf) {
+                if let TunnResult::WriteToNetwork(enc) =
+                    p.tunnel.encapsulate(&ip_packet, &mut enc_buf)
+                {
                     let _: Result<_, _> = udp.send_to(enc, addr);
                     tracing::info!("PaymentAccepted sent to peer {}", peer_ip);
                 }
@@ -1204,7 +1241,9 @@ impl Device {
             Ok(resp) => {
                 tracing::warn!(
                     "Settlement REJECTED: reason={:?} msg={:?} message={:?}",
-                    resp.error_reason, resp.error_message, resp.message
+                    resp.error_reason,
+                    resp.error_message,
+                    resp.message
                 );
                 return;
             }
@@ -1233,7 +1272,9 @@ impl Device {
                 tracing::info!("PaymentAccepted sent to peer {}", peer_ip);
             }
             TunnResult::Err(e) => tracing::error!("Failed to encapsulate PaymentAccepted: {:?}", e),
-            _ => tracing::warn!("Unexpected encapsulate result for PaymentAccepted (no active session?)"),
+            _ => tracing::warn!(
+                "Unexpected encapsulate result for PaymentAccepted (no active session?)"
+            ),
         }
     }
 
@@ -1319,8 +1360,12 @@ impl Device {
                         let _: Result<_, _> = udp.send_to(enc, addr);
                         tracing::info!("PaymentSubmit sent (auto-signed)");
                     }
-                    TunnResult::Err(e) => tracing::error!("Failed to encapsulate PaymentSubmit: {:?}", e),
-                    _ => tracing::warn!("Unexpected encapsulate result for PaymentSubmit (no active session?)"),
+                    TunnResult::Err(e) => {
+                        tracing::error!("Failed to encapsulate PaymentSubmit: {:?}", e)
+                    }
+                    _ => tracing::warn!(
+                        "Unexpected encapsulate result for PaymentSubmit (no active session?)"
+                    ),
                 }
             }
             MSG_PAYMENT_ACCEPTED => {

@@ -222,10 +222,10 @@ fn main() {
             .unwrap_or(false);
 
         if is_server {
-            let bind_addr = std::env::var("BT_HTTP_BIND")
-                .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-            let public_ip = std::env::var("BT_PUBLIC_IP")
-                .unwrap_or_else(|_| "127.0.0.1".to_string());
+            let bind_addr =
+                std::env::var("BT_HTTP_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+            let public_ip =
+                std::env::var("BT_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
 
             let payment_config = boringtun::payment::PaymentConfig::default();
             let snapshot = boringtun::device::http_api::PaymentConfigSnapshot {
@@ -237,8 +237,8 @@ fn main() {
             };
 
             // On macOS, "utun" gets assigned as "utun6" etc. Find the actual socket.
-            let actual_tun_name = find_uapi_interface(tun_name)
-                .unwrap_or_else(|| tun_name.to_string());
+            let actual_tun_name =
+                find_uapi_interface(tun_name).unwrap_or_else(|| tun_name.to_string());
             tracing::info!("Registration API using interface: {}", actual_tun_name);
 
             let state = Arc::new(boringtun::device::http_api::RegistrationState::new(
