@@ -1,3 +1,4 @@
+mod ens;
 mod vpn;
 
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use vpn::{ConnectedInfo, VpnManager, VpnStateEvent, VpnStatus, query_gateway_bal
 
 struct AppState {
     vpn: Mutex<VpnManager>,
-    world_id_session: Mutex<Option<Arc<idkit::BridgeConnection>>>,
+    world_id_session: Mutex<Option<Arc<idkit::bridge::IDKitRequestWrapper>>>,
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
@@ -105,12 +106,18 @@ fn get_pubkey() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn resolve_ens(name: String) -> Result<ens::VpnNodeInfo, String> {
+    ens::resolve_vpn_node(&name).await
+}
+
+
+#[tauri::command]
 async fn start_world_id(
     state: tauri::State<'_, AppState>,
     server_ip: Option<String>,
 ) -> Result<String, String> {
-    use idkit::bridge::{BridgeConnectionParams, RequestKind, Environment};
-    use idkit::{AppId, RpContext, VerificationLevel, Preset};
+    use idkit::bridge::{IDKitBuilder, IDKitRequestConfig, IDKitRequestWrapper, Environment};
+    use idkit::{RpContext, Preset, ConstraintNode};
 
     // 1. Fetch RP context from VPN server
     let api_base = match &server_ip {
@@ -141,34 +148,37 @@ async fn start_world_id(
     // 2. Get signal (WireGuard pubkey)
     let signal = vpn::get_pubkey_b64().unwrap_or_default();
 
-    // 3. Build params using OrbLegacy preset
-    let preset = Preset::OrbLegacy { signal: Some(signal) };
-    let (constraints, verification_level, legacy_signal) = preset.to_bridge_params();
-
-    let params = BridgeConnectionParams {
-        app_id: AppId::new("app_59ecb9a350d70a30543cb847da635d31").map_err(|e| format!("{e}"))?,
-        kind: RequestKind::Uniqueness { action },
-        constraints: Some(constraints),
-        rp_context,
+    // 3. Build config
+    let config = IDKitRequestConfig {
+        app_id: "app_59ecb9a350d70a30543cb847da635d31".into(),
+        action,
+        rp_context: std::sync::Arc::new(rp_context),
         action_description: None,
-        legacy_verification_level: verification_level,
-        legacy_signal: legacy_signal.unwrap_or_default(),
         bridge_url: None,
         allow_legacy_proofs: true,
         override_connect_base_url: None,
         return_to: None,
         environment: Some(Environment::Production),
+        connect_url_mode: None,
     };
 
-    // 4. Create bridge session
-    let session = idkit::BridgeConnection::create(params)
-        .await
-        .map_err(|e| format!("Failed to create World ID session: {e}"))?;
+    // 4. Create bridge session via IDKitBuilder (in blocking context to avoid nested runtime)
+    let preset = Preset::OrbLegacy { signal: Some(signal) };
+    let (constraints, _, _) = preset.to_bridge_params();
 
-    let url = session.connect_url();
+    let builder = IDKitBuilder::from_request(config);
+    let constraints_arc = std::sync::Arc::new(constraints);
+    let wrapper = tokio::task::spawn_blocking(move || {
+        builder.constraints(constraints_arc)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+    .map_err(|e| format!("Failed to create World ID session: {e}"))?;
 
-    // Store session for polling
-    *state.world_id_session.lock().await = Some(Arc::new(session));
+    let url = wrapper.connect_url();
+
+    // Store wrapper for polling
+    *state.world_id_session.lock().await = Some(wrapper);
 
     Ok(url)
 }
@@ -178,23 +188,35 @@ async fn poll_world_id(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let session = state.world_id_session.lock().await;
-    let session = session.as_ref().ok_or("No active World ID session")?;
+    let wrapper = session.as_ref().ok_or("No active World ID session")?;
+    let wrapper_clone = Arc::clone(wrapper);
+    drop(session); // release lock before blocking
 
-    match session.poll_for_status().await.map_err(|e| format!("{e}"))? {
-        idkit::Status::WaitingForConnection => {
+    let status = tokio::task::spawn_blocking(move || {
+        wrapper_clone.poll_status_once()
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?;
+
+    use idkit::bridge::StatusWrapper;
+    match status {
+        StatusWrapper::WaitingForConnection => {
             Ok(serde_json::json!({ "status": "waiting" }))
         }
-        idkit::Status::AwaitingConfirmation => {
+        StatusWrapper::AwaitingConfirmation => {
             Ok(serde_json::json!({ "status": "confirming" }))
         }
-        idkit::Status::Confirmed(result) => {
+        StatusWrapper::Confirmed { result } => {
             Ok(serde_json::json!({
                 "status": "confirmed",
                 "result": result,
             }))
         }
-        idkit::Status::Failed(err) => {
-            Err(format!("World ID verification failed: {err}"))
+        StatusWrapper::Failed { error } => {
+            Err(format!("World ID verification failed: {error}"))
+        }
+        StatusWrapper::NetworkingError { error } => {
+            Err(format!("World ID network error: {error}"))
         }
     }
 }
@@ -254,7 +276,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance, get_wallet_info, get_pubkey, start_world_id, poll_world_id])
+        .invoke_handler(tauri::generate_handler![connect, disconnect, get_status, refresh_balance, get_wallet_info, get_pubkey, start_world_id, poll_world_id, resolve_ens])
         .run(tauri::generate_context!())
         .expect("error while running vpntee");
 }

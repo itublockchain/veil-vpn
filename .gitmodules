@@ -1,3 +1,0 @@
-[submodule "deps/idkit"]
-	path = deps/idkit
-	url = https://github.com/worldcoin/idkit.git

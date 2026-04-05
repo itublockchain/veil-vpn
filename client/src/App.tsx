@@ -123,6 +123,35 @@ export default function App() {
     }
   }, [walletAddress]);
 
+  const resolveEns = async () => {
+    if (!ensInput.trim()) return;
+    try {
+      setError(null);
+      const fullName = `${ensInput.trim()}.teevpn.eth`;
+      const info = await invoke<{
+        ens_name: string;
+        is_human: boolean;
+        endpoint: string;
+        http: string;
+        public_key: string;
+      }>("resolve_ens", { name: fullName });
+      // endpoint = "37.27.29.160:51820" -> IP = "37.27.29.160"
+      const ip = info.endpoint.split(":")[0];
+      if (ip) {
+        setSelectedServer({
+          ens: fullName,
+          region: "ENS",
+          ip,
+          humanOnly: info.is_human,
+        });
+        setNodesOpen(false);
+        setEnsInput("");
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const startWorldIdPoll = () => {
     pollingRef.current = window.setInterval(async () => {
       try {
@@ -297,9 +326,11 @@ export default function App() {
                   placeholder="custom"
                   value={ensInput}
                   onChange={(e) => setEnsInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") resolveEns(); }}
                   spellCheck={false}
                 />
-                <span className="ens-suffix">.veilvpn.eth</span>
+                <span className="ens-suffix">.teevpn.eth</span>
+                <button className="ens-go" onClick={resolveEns} disabled={!ensInput.trim()}>GO</button>
               </div>
             </div>
           </div>
