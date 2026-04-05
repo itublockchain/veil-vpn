@@ -33,4 +33,4 @@ hex = "0.4"
 dirs = "5"
 lazy_static = "1"
 tauri-plugin-localhost = "2.3.2"
-idkit-core = { path = "../../../worldcoin-idkit/rust/core", features = ["bridge", "native-crypto"] }
+idkit-core = { path = "../../deps/idkit/rust/core", features = ["bridge", "native-crypto"] }
